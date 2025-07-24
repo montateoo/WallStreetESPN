@@ -29,6 +29,7 @@ const unsigned long quoteDelay = 1500;
 bool isFetching = false;
 
 // === Altre variabili globali ===
+const int wifiResetButtonPin = 12;  // D6
 const int buttonPin = 14;
 const int ledGreenPin = 13;  // GPIO13
 const int ledRedPin = 15;    // GPIO15
@@ -161,13 +162,160 @@ void loadListFromFS() {
 
 // === Web Server ===
 void handleRoot() {
-  String html = "<h1>Lista Collegata Persistente</h1>";
-  html += "<form action='/add'><input name='value'><button>Aggiungi</button></form>";
-  html += "<form action='/remove'><input name='value'><button>Rimuovi</button></form>";
-  html += "<form action='/clear'><button>Cancella Tutto</button></form>";
-  html += "<h3>Lista Corrente:</h3>" + listToStringHTML();
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <title>My Stocks</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background-color: #f2f2f2;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+    }
+    .container {
+      background-color: #fff;
+      padding: 30px;
+      border-radius: 12px;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+      text-align: center;
+      max-width: 500px;
+      width: 100%;
+    }
+    h1 {
+      color: #333;
+      font-size: 28px;
+    }
+    .form-row {
+      margin: 10px 0;
+    }
+    form {
+      display: flex;
+    }
+    .text-input {
+      padding: 10px;
+      font-size: 16px;
+      border: 1px solid #ccc;
+      border-radius: 4px 0 0 4px;
+      flex: 1;
+    }
+    .blue-button {
+      padding: 10px 20px;
+      font-size: 16px;
+      background-color: #2196F3;
+      color: white;
+      border: none;
+      border-radius: 0 4px 4px 0;
+      cursor: pointer;
+    }
+    .blue-button:hover {
+      background-color: #0b7dda;
+    }
+    .red-button {
+      padding: 10px 20px;
+      background-color: #f44336;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-top: 15px;
+    }
+    .red-button:hover {
+      background-color: #d32f2f;
+    }
+    ul {
+      text-align: left;
+      margin-top: 20px;
+      padding-left: 20px;
+    }
+    li {
+      background: #eee;
+      margin: 4px 0;
+      padding: 6px;
+      border-radius: 4px;
+    }
+    #confirmModal {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.5);
+      text-align: center;
+    }
+    .modal-content {
+      background: white;
+      margin: 15% auto;
+      padding: 20px;
+      border-radius: 8px;
+      width: 300px;
+    }
+  </style>
+  <script>
+    function showCustomConfirm() {
+      document.getElementById("confirmModal").style.display = "block";
+    }
+
+    function hideCustomConfirm() {
+      document.getElementById("confirmModal").style.display = "none";
+    }
+
+    function proceedClear() {
+      window.location.href = "/clear";
+    }
+  </script>
+</head>
+<body>
+  <div class="container">
+    <h1>My Stocks</h1>
+
+    <div class="form-row">
+      <form action='/add'>
+        <input type='text' name='value' placeholder='Add new stock' class='text-input'>
+        <button type='submit' class='blue-button'>Add</button>
+      </form>
+    </div>
+
+    <div class="form-row">
+      <form action='/remove'>
+        <input type='text' name='value' placeholder='Remove stock' class='text-input'>
+        <button type='submit' class='blue-button'>Remove</button>
+      </form>
+    </div>
+
+    <button class='red-button' onclick='showCustomConfirm()'>Erase all</button>
+
+    <h3>My stocks:</h3>
+)rawliteral";
+
+  html += listToStringHTML();
+
+  html += R"rawliteral(
+  </div>
+
+  <!-- Custom Confirm Modal -->
+  <div id="confirmModal">
+    <div class="modal-content">
+      <h3>Are you sure?</h3>
+      <p>This will delete the entire list.</p>
+      <button onclick="proceedClear()" class="red-button">Yes, erase</button>
+      <button onclick="hideCustomConfirm()">Cancel</button>
+    </div>
+  </div>
+
+</body>
+</html>
+)rawliteral";
+
   server.send(200, "text/html", html);
 }
+
+
 
 void handleAdd() {
   String value = server.arg("value");
@@ -351,6 +499,7 @@ void setup() {
   server.begin();
 
   pinMode(buttonPin, INPUT);  //non INPUT_PULLUP
+  pinMode(wifiResetButtonPin, INPUT);
   pinMode(ledGreenPin, OUTPUT);
   pinMode(ledRedPin, OUTPUT);
   digitalWrite(ledGreenPin, LOW);
@@ -395,5 +544,26 @@ void loop() {
       updateDisplay();  // mostra lo stock corrente ogni 1 minuto
     }
   }
+
+  static bool wifiResetPressed = false;
+  static unsigned long wifiResetStart = 0;
+
+if (digitalRead(wifiResetButtonPin) == HIGH) {  // button pressed
+  if (!wifiResetPressed) {
+    wifiResetPressed = true;
+    wifiResetStart = millis();
+  } else if (millis() - wifiResetStart > 5000) {  // held > 5 sec
+    Serial.println("🔧 WiFi reset requested via dedicated button");
+    digitalWrite(ledGreenPin, LOW);
+    digitalWrite(ledRedPin, LOW);
+    delay(500);
+    WiFiManager wifiManager;
+    wifiManager.resetSettings();
+    delay(500);
+    ESP.restart();
+  }
+} else {
+  wifiResetPressed = false;  // reset if button released early
 }
 
+}
