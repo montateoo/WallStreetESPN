@@ -1,2 +1,2 @@
 # WallStreetESPN
-display for stock portfolio price
+Smart display for stock portfolio price
