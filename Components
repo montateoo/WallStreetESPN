@@ -4,6 +4,6 @@ ESP8266 dev board
 2 buttons
 1 led (GREEN)
 1 led (RED)
-1 resistance (10K)
+2 resistance (10K)
 2 resistance (220)
 1 I2C display
