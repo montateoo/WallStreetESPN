@@ -1,0 +1,399 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <LittleFS.h>
+#include <WiFiManager.h>
+#include <ArduinoJson.h>
+#include <map>
+
+// === Struttura della lista collegata ===
+struct Node {
+  String data;
+  Node* next;
+};
+
+struct StockData {
+  float currentPrice = 0;
+  float percent = 0;
+};
+
+std::map<String, StockData> stockCache;
+
+Node* head = nullptr;
+
+// === Stato per fetch non bloccante ===
+Node* currentNode = nullptr;
+unsigned long lastQuoteRequestTime = 0;
+const unsigned long quoteDelay = 1500;
+bool isFetching = false;
+
+// === Altre variabili globali ===
+const int buttonPin = 14;
+const int ledGreenPin = 13;  // GPIO13
+const int ledRedPin = 15;    // GPIO15
+bool serverMode = false;
+int stockNum = 0;
+
+Node* displayNode = nullptr;
+unsigned long lastDisplaySwitch = 0;
+const unsigned long displayInterval = 60000; // 1 minuto
+bool newStock = false;
+
+ESP8266WebServer server(80);
+
+// === Funzioni Lista Collegata ===
+void addNode(String value) {
+  if (value == "") return;
+  Node* newNode = new Node{value, nullptr};
+  if (!head) head = newNode;
+  else {
+    Node* temp = head;
+    while (temp->next) temp = temp->next;
+    temp->next = newNode;
+  }
+  saveListToFS();
+  stockNum++;
+  newStock = true;
+}
+
+bool removeNode(String value) {
+  Node* temp = head;
+  Node* prev = nullptr;
+  while (temp) {
+    if (temp->data == value) {
+      if (prev) prev->next = temp->next;
+      else head = temp->next;
+      delete temp;
+      saveListToFS();
+      stockNum--;
+      return true;
+    }
+    prev = temp;
+    temp = temp->next;
+  }
+  return false;
+}
+
+void clearList() {
+  while (head) {
+    Node* temp = head;
+    head = head->next;
+    delete temp;
+  }
+  saveListToFS();
+  stockNum=0;
+
+  // 🔁 Ferma qualsiasi fetch in corso
+  currentNode = nullptr;
+  isFetching = false;
+}
+
+String listToStringHTML() {
+  String output = "<ul>";
+  Node* temp = head;
+  while (temp) {
+    output += "<li>" + temp->data + "</li>";
+    temp = temp->next;
+  }
+  output += "</ul>";
+  return output;
+}
+
+// === Funzioni LittleFS ===
+void saveListToFS() {
+  File file = LittleFS.open("/list.txt", "w");
+  if (!file) {
+    Serial.println("Errore apertura file per scrittura!");
+    return;
+  }
+  Node* temp = head;
+  while (temp) {
+    file.println(temp->data);
+    temp = temp->next;
+  }
+  file.close();
+}
+
+void loadListFromFS() {
+  if (!LittleFS.exists("/list.txt")) {
+    Serial.println("⚠️ list.txt non trovato");
+    return;
+  }
+
+  File file = LittleFS.open("/list.txt", "r");
+  if (!file) {
+    Serial.println("⚠️ Impossibile aprire list.txt in lettura");
+    return;
+  }
+
+  Node* tempHead = nullptr;
+  Node* tail = nullptr;  // Ottimizzazione
+  int count = 0;         // Conta i nodi caricati
+
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0) {
+      Node* newNode = new Node{line, nullptr};
+      if (!tempHead) {
+        tempHead = newNode;
+        tail = newNode;
+      } else {
+        tail->next = newNode;
+        tail = newNode;
+      }
+      count++;
+    }
+  }
+  file.close();
+
+  if (tempHead) {
+    clearList();
+    head = tempHead;
+    stockNum = count;  // ✅ aggiorna correttamente
+    Serial.println("✅ Lista caricata da LittleFS");
+  } else {
+    Serial.println("⚠️ File vuoto o nessun dato valido");
+  }
+}
+
+
+// === Web Server ===
+void handleRoot() {
+  String html = "<h1>Lista Collegata Persistente</h1>";
+  html += "<form action='/add'><input name='value'><button>Aggiungi</button></form>";
+  html += "<form action='/remove'><input name='value'><button>Rimuovi</button></form>";
+  html += "<form action='/clear'><button>Cancella Tutto</button></form>";
+  html += "<h3>Lista Corrente:</h3>" + listToStringHTML();
+  server.send(200, "text/html", html);
+}
+
+void handleAdd() {
+  String value = server.arg("value");
+  if (value.length() > 0) {
+    addNode(value);
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  } else {
+    server.send(400, "text/plain", "Missing 'value'");
+  }
+}
+
+void handleRemove() {
+  String value = server.arg("value");
+  if (value.length() > 0) {
+    bool removed = removeNode(value);
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", removed ? "Removed" : "Not found");
+  } else {
+    server.send(400, "text/plain", "Missing 'value'");
+  }
+}
+
+void handleClear() {
+  clearList();
+  server.sendHeader("Location", "/", true);
+  server.send(302, "text/plain", "");
+}
+
+void handleNonBlockingFetch() {
+  if (!isFetching) return;
+  if (!currentNode) {
+    Serial.println("✅ Completato ciclo fetch.");
+    isFetching = false;
+    return;
+  }
+
+  if (millis() - lastQuoteRequestTime < quoteDelay) return;
+
+  String symbol = currentNode->data;
+  symbol.replace("/", "");
+  String apiKey = "d1vq1a9r01qmbi8phj8gd1vq1a9r01qmbi8phj90";
+  String url = "https://finnhub.io/api/v1/quote?symbol=" + symbol + "&token=" + apiKey;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient https;
+  Serial.println("🔎 Requesting: " + url);
+
+  if (https.begin(client, url)) {
+    https.addHeader("User-Agent", "Mozilla/5.0");
+    int httpCode = https.GET();
+
+    if (httpCode == HTTP_CODE_OK) {
+      String payload = https.getString();
+      DynamicJsonDocument doc(1024);
+      if (deserializeJson(doc, payload)) {
+        Serial.println("⚠️ JSON parsing error");
+      } else {
+        float currentPrice = doc["c"];
+        float prevClose = doc["pc"];
+        float percent = 0;
+        if (prevClose != 0) {
+          percent = ((currentPrice - prevClose) / prevClose) * 100.0;
+        }
+
+        stockCache[symbol] = { currentPrice, percent };
+        Serial.printf("📥 %s: %.2f (%.2f%%)\n", symbol.c_str(), currentPrice, percent);
+
+      }
+    } else {
+      Serial.printf("⚠️ HTTP error: %d\n", httpCode);
+    }
+    https.end();
+  } else {
+    Serial.println("[HTTPS] Connection failed");
+  }
+
+  lastQuoteRequestTime = millis();
+  currentNode = currentNode->next;
+}
+
+
+// === Gestione pulsante migliorata ===
+void checkButton() {
+  static bool buttonPreviouslyPressed = false;
+
+  bool currentReading = digitalRead(buttonPin); // HIGH quando premuto con pull-down
+
+  if (currentReading && !buttonPreviouslyPressed) {
+    // Bottone è appena stato premuto
+    serverMode = !serverMode;
+    isFetching = false;  // Ferma eventuale fetch in corso
+    Serial.print("🔁 Modalità cambiata: ");
+    Serial.println(serverMode ? "SERVER" : "DISPLAY");
+
+     // Spegni entrambi i LED al cambio modalità
+    digitalWrite(ledGreenPin, LOW);
+    digitalWrite(ledRedPin, LOW);
+  }
+
+  buttonPreviouslyPressed = currentReading;
+}
+
+
+void updateDisplay() {
+  if (!displayNode) displayNode = head;
+  if (!displayNode) return;  // lista vuota
+
+  if (millis() - lastDisplaySwitch >= displayInterval) {
+    displayNode = displayNode->next;
+    if (!displayNode) displayNode = head; // ricomincia da capo
+    lastDisplaySwitch = millis();
+
+    String symbol = displayNode->data;
+    symbol.replace("/", "");
+
+    if (stockCache.count(symbol)) {
+      StockData data = stockCache[symbol];
+      Serial.printf("📺 Mostrando %s: %.2f (%.2f%%)\n", symbol.c_str(), data.currentPrice, data.percent);
+
+      // === Controllo LED ===
+      if (data.percent > 0) {
+        digitalWrite(ledGreenPin, HIGH);
+        digitalWrite(ledRedPin, LOW);
+      } else {
+        digitalWrite(ledGreenPin, LOW);
+        digitalWrite(ledRedPin, HIGH);
+      }
+
+    } else {
+      Serial.printf("📺 %s: dati non disponibili\n", symbol.c_str());
+      digitalWrite(ledGreenPin, LOW);
+      digitalWrite(ledRedPin, LOW);  // spegne entrambi se non c'è dato
+    }
+  }
+}
+
+void blinkLedsInServerMode() {
+  static unsigned long lastBlinkTime = 0;
+  static bool ledState = false;
+
+  const unsigned long blinkInterval = 800;  // ms
+
+  if (millis() - lastBlinkTime >= blinkInterval) {
+    ledState = !ledState;
+    digitalWrite(ledGreenPin, ledState ? HIGH : LOW);
+    digitalWrite(ledRedPin, ledState ? LOW : HIGH);
+    lastBlinkTime = millis();
+  }
+}
+
+
+
+// === Setup ===
+void setup() {
+  Serial.begin(115200);
+
+  if (!LittleFS.begin()) {
+    Serial.println("LittleFS mount failed");
+    return;
+  }
+
+  WiFiManager wifiManager;
+  if (!wifiManager.autoConnect("WallStreetDisplay", "12345678")) {
+    Serial.println("Wi-Fi fallita. Riavvio...");
+    delay(3000);
+    ESP.restart();
+  }
+
+  Serial.print("Connesso. IP: ");
+  Serial.println(WiFi.localIP());
+
+  loadListFromFS();
+
+  server.on("/", handleRoot);
+  server.on("/add", handleAdd);
+  server.on("/remove", handleRemove);
+  server.on("/clear", handleClear);
+  server.begin();
+
+  pinMode(buttonPin, INPUT);  //non INPUT_PULLUP
+  pinMode(ledGreenPin, OUTPUT);
+  pinMode(ledRedPin, OUTPUT);
+  digitalWrite(ledGreenPin, LOW);
+  digitalWrite(ledRedPin, LOW);
+
+  Serial.println("🟢 Avviato in modalità DISPLAY");
+  newStock = true; //when turned on downloads new data
+}
+
+// === Loop ===
+unsigned long lastRequest = 0;
+
+
+void loop() {
+  checkButton();
+
+  if (serverMode) {
+    server.handleClient();
+    blinkLedsInServerMode();  // 🔁 lampeggia in modalità server
+  } else {
+
+    if (!head) {
+      Serial.println("⚠️ Nessuno stock da mostrare. Passa in modalità SERVER per aggiungere i tuoi stock.");
+      delay(3000);  // evita flooding della seriale
+      return;
+    }
+
+    // Ogni 10 minuti fai fetch se non in corso
+    if ((!isFetching && millis() - lastRequest > 600000)||(newStock)) {
+      currentNode = head;
+      isFetching = true;
+      lastQuoteRequestTime = millis() - quoteDelay;
+      lastRequest = millis();
+    }
+
+    if (isFetching) {
+      handleNonBlockingFetch();
+      if(newStock){
+       newStock = false;
+      }
+    } else {
+      updateDisplay();  // mostra lo stock corrente ogni 1 minuto
+    }
+  }
+}
+
