@@ -7,3 +7,4 @@ ESP8266 dev board
 2 resistance (10K)
 2 resistance (220)
 1 I2C display
+1 usb-c alimentation module
