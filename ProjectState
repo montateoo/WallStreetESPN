@@ -3,4 +3,4 @@ TODO:
 correctly implement display
 box to view and modify the API key
 Vin for the esp8266
-PCB
+PCB (keep the configuration spin are unusable during boot)
