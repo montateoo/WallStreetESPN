@@ -6,6 +6,20 @@
 #include <WiFiManager.h>
 #include <ArduinoJson.h>
 #include <map>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Fonts/FreeSansBold9pt7b.h>
+#include <Fonts/FreeSansBold12pt7b.h>
+#include <Fonts/FreeSansBold7pt7b>
+
+
+#define SCREEN_WIDTH 128 // OLED width, in pixels
+#define SCREEN_HEIGHT 64 // OLED height, in pixels
+
+// I2C pins for ESP8266 (D1 = SCL, D2 = SDA)
+#define OLED_RESET -1 // No reset pin
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // === Struttura della lista collegata ===
 struct Node {
@@ -424,21 +438,45 @@ void checkButton() {
 
 void updateDisplay() {
   if (!displayNode) displayNode = head;
-  if (!displayNode) return;  // lista vuota
+  if (!displayNode) return;
 
   if (millis() - lastDisplaySwitch >= displayInterval) {
     displayNode = displayNode->next;
-    if (!displayNode) displayNode = head; // ricomincia da capo
+    if (!displayNode) displayNode = head;
     lastDisplaySwitch = millis();
 
     String symbol = displayNode->data;
     symbol.replace("/", "");
 
+    display.clearDisplay();
+
+    // --- Stock Symbol (Top) ---
+    display.setFont(&FreeSansBold9pt7b);
+    display.setTextSize(1);
+    int16_t x1, y1;
+    uint16_t w, h;
+    display.getTextBounds(symbol, 0, 0, &x1, &y1, &w, &h);
+    display.setCursor((128 - w) / 2, h + 2);
+    display.print(symbol);
+
     if (stockCache.count(symbol)) {
       StockData data = stockCache[symbol];
-      Serial.printf("📺 Mostrando %s: %.2f (%.2f%%)\n", symbol.c_str(), data.currentPrice, data.percent);
 
-      // === Controllo LED ===
+      // --- Price (Middle, Bigger Font) ---
+      display.setFont(&FreeSansBold12pt7b);
+      String priceStr = "$" + String(data.currentPrice, 2);
+      display.getTextBounds(priceStr, 0, 0, &x1, &y1, &w, &h);
+      display.setCursor((128 - w) / 2, 38);
+      display.print(priceStr);
+
+      // --- Change (Bottom, Smaller Font) ---
+      display.setFont(&FreeSansBold7pt7b);
+      String changeStr = "24hr: " + String(data.percent, 2) + "%";
+      display.getTextBounds(changeStr, 0, 0, &x1, &y1, &w, &h);
+      display.setCursor((128 - w) / 2, 60);
+      display.print(changeStr);
+
+      // LED control
       if (data.percent > 0) {
         digitalWrite(ledGreenPin, HIGH);
         digitalWrite(ledRedPin, LOW);
@@ -448,10 +486,17 @@ void updateDisplay() {
       }
 
     } else {
-      Serial.printf("📺 %s: dati non disponibili\n", symbol.c_str());
+      display.setFont(&FreeSansBold7pt7b);
+      String noData = "No data";
+      display.getTextBounds(noData, 0, 0, &x1, &y1, &w, &h);
+      display.setCursor((128 - w) / 2, 38);
+      display.print(noData);
+
       digitalWrite(ledGreenPin, LOW);
-      digitalWrite(ledRedPin, LOW);  // spegne entrambi se non c'è dato
+      digitalWrite(ledRedPin, LOW);
     }
+
+    display.display();
   }
 }
 
@@ -479,6 +524,21 @@ void setup() {
     Serial.println("LittleFS mount failed");
     return;
   }
+
+  Wire.begin(D2, D1); // SDA, SCL
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3C for most OLEDs
+    Serial.println(F("SSD1306 allocation failed"));
+    for (;;); // Don't proceed, loop forever
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println(F("Starting..."));
+  display.display();
+
 
   WiFiManager wifiManager;
   if (!wifiManager.autoConnect("WallStreetDisplay", "12345678")) {
