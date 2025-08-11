@@ -11,8 +11,6 @@
 #include <Adafruit_SSD1306.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
-#include <Fonts/FreeSansBold7pt7b.h>
-
 
 #define SCREEN_WIDTH 128 // OLED width, in pixels
 #define SCREEN_HEIGHT 64 // OLED height, in pixels
@@ -54,6 +52,18 @@ Node* displayNode = nullptr;
 unsigned long lastDisplaySwitch = 0;
 const unsigned long displayInterval = 60000; // 1 minuto
 bool newStock = false;
+
+// Example 24x24 server icon bitmap
+const unsigned char PROGMEM serverIcon[] = {
+  0x00,0x00,0x00, 0x1F,0xFF,0x80, 0x20,0x00,0x40,
+  0x27,0xFF,0x40, 0x24,0x00,0x40, 0x24,0xFF,0x40,
+  0x24,0x81,0x40, 0x24,0xFF,0x40, 0x24,0x00,0x40,
+  0x27,0xFF,0x40, 0x20,0x00,0x40, 0x1F,0xFF,0x80,
+  0x00,0x00,0x00, 0x1F,0xFF,0x80, 0x20,0x00,0x40,
+  0x27,0xFF,0x40, 0x24,0x00,0x40, 0x24,0xFF,0x40,
+  0x24,0x81,0x40, 0x24,0xFF,0x40, 0x24,0x00,0x40,
+  0x27,0xFF,0x40, 0x20,0x00,0x40, 0x1F,0xFF,0x80
+};
 
 ESP8266WebServer server(80);
 
@@ -450,30 +460,34 @@ void updateDisplay() {
 
     display.clearDisplay();
 
-    // --- Stock Symbol (Top) ---
-    display.setFont(&FreeSansBold9pt7b);
-    display.setTextSize(1);
     int16_t x1, y1;
     uint16_t w, h;
+
+    // --- Stock Symbol (Top, shifted down by 2px) ---
+    display.setFont(&FreeSansBold9pt7b);
+    display.setTextSize(1);
     display.getTextBounds(symbol, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor((128 - w) / 2, h + 2);
+    display.setCursor((128 - w) / 2, h + 4); // was +2 → now +4
     display.print(symbol);
 
     if (stockCache.count(symbol)) {
       StockData data = stockCache[symbol];
 
-      // --- Price (Middle, Bigger Font) ---
+      // --- Price (Middle, shifted down by 2px) ---
       display.setFont(&FreeSansBold12pt7b);
       String priceStr = "$" + String(data.currentPrice, 2);
       display.getTextBounds(priceStr, 0, 0, &x1, &y1, &w, &h);
-      display.setCursor((128 - w) / 2, 38);
+      display.setCursor((128 - w) / 2, 40); // was 38 → now 40
       display.print(priceStr);
 
-      // --- Change (Bottom, Smaller Font) ---
-      display.setFont(&FreeSansBold7pt7b);
-      String changeStr = "24hr: " + String(data.percent, 2) + "%";
-      display.getTextBounds(changeStr, 0, 0, &x1, &y1, &w, &h);
-      display.setCursor((128 - w) / 2, 60);
+
+      // --- Change (Bottom, slightly bigger) ---
+      display.setFont(&FreeSansBold9pt7b); // bigger than default by ~1px
+      String changeStr = String(data.percent, 2) + "%";
+      int16_t cx1, cy1;
+      uint16_t cw, ch;
+      display.getTextBounds(changeStr, 0, 0, &cx1, &cy1, &cw, &ch);
+      display.setCursor((128 - cw) / 2, 60);
       display.print(changeStr);
 
       // LED control
@@ -486,10 +500,11 @@ void updateDisplay() {
       }
 
     } else {
-      display.setFont(&FreeSansBold7pt7b);
+      display.setFont();
+      display.setTextSize(1);
       String noData = "No data";
       display.getTextBounds(noData, 0, 0, &x1, &y1, &w, &h);
-      display.setCursor((128 - w) / 2, 38);
+      display.setCursor((128 - w) / 2, 40);
       display.print(noData);
 
       digitalWrite(ledGreenPin, LOW);
@@ -499,6 +514,31 @@ void updateDisplay() {
     display.display();
   }
 }
+
+void showServerMode() {
+  display.clearDisplay();
+  
+  // Disegna icona server centrata in alto
+  display.drawBitmap((SCREEN_WIDTH - 24) / 2, 4, serverIcon, 24, 24, SSD1306_WHITE);
+
+  // Imposta font più piccolo di prima
+  display.setFont(&FreeSansBold9pt7b);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  // Calcola per centrare il testo
+  int16_t x1, y1;
+  uint16_t w, h;
+  String text = "SERVER";
+  display.getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
+
+  // Posiziona testo sotto l’icona
+  display.setCursor((SCREEN_WIDTH - w) / 2, 48);
+  display.print(text);
+
+  display.display();
+}
+
 
 void blinkLedsInServerMode() {
   static unsigned long lastBlinkTime = 0;
@@ -579,6 +619,7 @@ void loop() {
   if (serverMode) {
     server.handleClient();
     blinkLedsInServerMode();  // 🔁 lampeggia in modalità server
+    showServerMode();
   } else {
 
     if (!head) {
