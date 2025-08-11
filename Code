@@ -12,6 +12,7 @@
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
 
+
 #define SCREEN_WIDTH 128 // OLED width, in pixels
 #define SCREEN_HEIGHT 64 // OLED height, in pixels
 
@@ -64,6 +65,36 @@ const unsigned char PROGMEM serverIcon[] = {
   0x24,0x81,0x40, 0x24,0xFF,0x40, 0x24,0x00,0x40,
   0x27,0xFF,0x40, 0x20,0x00,0x40, 0x1F,0xFF,0x80
 };
+
+// New 24x24 stock market arrow up icon bitmap (monochrome)
+const unsigned char PROGMEM wallStreetIcon[] = {
+  0x00,0x00,0x00,
+  0x00,0x00,0x00,
+  0x1F,0xFF,0xF8,
+  0x3F,0xFF,0xFC,
+  0x3F,0xFF,0x8C,
+  0x3F,0xFF,0x8C,
+  0x3F,0xFF,0x2C,
+  0x3F,0xCE,0x7C,
+  0x3F,0xC4,0xFC,
+  0x38,0x31,0xBC,
+  0x38,0x3B,0x1C,
+  0x27,0xFE,0x2C,
+  0x27,0xFE,0x3C,
+  0x3F,0xFF,0x0C,
+  0x3F,0xFE,0x2C,
+  0x3F,0xFE,0x0C,
+  0x3F,0xFF,0xBC,
+  0x3F,0xFF,0xFC,
+  0x3C,0x9B,0x6C,
+  0x20,0x1B,0xAC,
+  0x32,0x89,0x6C,
+  0x1F,0xFF,0xF8,
+  0x00,0x00,0x00,
+  0x00,0x00,0x00
+};
+
+
 
 ESP8266WebServer server(80);
 
@@ -447,72 +478,83 @@ void checkButton() {
 
 
 void updateDisplay() {
+  static String oldSymbol = "";
+  static StockData oldData;
+  static bool firstRun = true;
+
   if (!displayNode) displayNode = head;
   if (!displayNode) return;
 
-  if (millis() - lastDisplaySwitch >= displayInterval) {
+  if (millis() - lastDisplaySwitch >= displayInterval || firstRun) {
+    // Save old data for animation
+    if (!firstRun) {
+      oldSymbol = displayNode->data;
+      oldSymbol.replace("/", "");
+      if (stockCache.count(oldSymbol)) oldData = stockCache[oldSymbol];
+    }
+
+    // Advance to next stock
     displayNode = displayNode->next;
     if (!displayNode) displayNode = head;
     lastDisplaySwitch = millis();
 
-    String symbol = displayNode->data;
-    symbol.replace("/", "");
+    String newSymbol = displayNode->data;
+    newSymbol.replace("/", "");
+    StockData newData;
+    if (stockCache.count(newSymbol)) newData = stockCache[newSymbol];
 
-    display.clearDisplay();
-
-    int16_t x1, y1;
-    uint16_t w, h;
-
-    // --- Stock Symbol (Top, shifted down by 2px) ---
-    display.setFont(&FreeSansBold9pt7b);
-    display.setTextSize(1);
-    display.getTextBounds(symbol, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor((128 - w) / 2, h + 4); // was +2 → now +4
-    display.print(symbol);
-
-    if (stockCache.count(symbol)) {
-      StockData data = stockCache[symbol];
-
-      // --- Price (Middle, shifted down by 2px) ---
-      display.setFont(&FreeSansBold12pt7b);
-      String priceStr = "$" + String(data.currentPrice, 2);
-      display.getTextBounds(priceStr, 0, 0, &x1, &y1, &w, &h);
-      display.setCursor((128 - w) / 2, 40); // was 38 → now 40
-      display.print(priceStr);
-
-
-      // --- Change (Bottom, slightly bigger) ---
-      display.setFont(&FreeSansBold9pt7b); // bigger than default by ~1px
-      String changeStr = String(data.percent, 2) + "%";
-      int16_t cx1, cy1;
-      uint16_t cw, ch;
-      display.getTextBounds(changeStr, 0, 0, &cx1, &cy1, &cw, &ch);
-      display.setCursor((128 - cw) / 2, 60);
-      display.print(changeStr);
-
-      // LED control
-      if (data.percent > 0) {
-        digitalWrite(ledGreenPin, HIGH);
-        digitalWrite(ledRedPin, LOW);
-      } else {
-        digitalWrite(ledGreenPin, LOW);
-        digitalWrite(ledRedPin, HIGH);
-      }
-
-    } else {
-      display.setFont();
-      display.setTextSize(1);
-      String noData = "No data";
-      display.getTextBounds(noData, 0, 0, &x1, &y1, &w, &h);
-      display.setCursor((128 - w) / 2, 40);
-      display.print(noData);
-
-      digitalWrite(ledGreenPin, LOW);
-      digitalWrite(ledRedPin, LOW);
+    if (firstRun) {
+      // First draw without animation
+      drawStockFrame(newSymbol, newData, 0);
+      display.display();
+      firstRun = false;
+      return;
     }
 
-    display.display();
+    // Slide animation from old → new
+    for (int offset = 0; offset <= 128; offset += 8) { // step = 8px for speed
+      display.clearDisplay();
+
+      // Old stock sliding left
+      drawStockFrame(oldSymbol, oldData, -offset);
+
+      // New stock sliding in from right
+      drawStockFrame(newSymbol, newData, 128 - offset);
+
+      display.display();
+      delay(20); // controls animation smoothness
+    }
   }
+}
+
+// Helper function: draws a stock screen at an X offset
+void drawStockFrame(String symbol, StockData data, int xOffset) {
+  int16_t x1, y1;
+  uint16_t w, h;
+
+  // Symbol
+  display.setFont(&FreeSansBold9pt7b);
+  display.setTextSize(1);
+  display.getTextBounds(symbol, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((128 - w) / 2 + xOffset, h + 4);
+  display.print(symbol);
+
+  // Price
+  display.setFont(&FreeSansBold12pt7b);
+  String priceStr = "$" + String(data.currentPrice, 2);
+  display.getTextBounds(priceStr, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((128 - w) / 2 + xOffset, 40);
+  display.fillRect((128 - w) / 2, 28, w, h, BLACK);
+  display.print(priceStr);
+
+  // Change
+  display.setFont(&FreeSansBold9pt7b);
+  String changeStr = String(data.percent, 2) + "%";
+  int16_t cx1, cy1;
+  uint16_t cw, ch;
+  display.getTextBounds(changeStr, 0, 0, &cx1, &cy1, &cw, &ch);
+  display.setCursor((128 - cw) / 2 + xOffset, 60);
+  display.print(changeStr);
 }
 
 void showServerMode() {
@@ -534,6 +576,30 @@ void showServerMode() {
 
   // Posiziona testo sotto l’icona
   display.setCursor((SCREEN_WIDTH - w) / 2, 48);
+  display.print(text);
+
+  display.display();
+}
+
+void showWallStreet() {
+  display.clearDisplay();
+  
+  // Draw stock market icon centered at top
+  display.drawBitmap((SCREEN_WIDTH - 24) / 2, 4, wallStreetIcon, 24, 24, SSD1306_WHITE);
+
+  // Use FreeSansBold8pt7b font (1 pixel smaller than 9pt)
+  display.setFont();  // Clear current font to default 5x7 font
+  display.setTextSize(2);  // Default size, which is quite small
+  display.setTextColor(SSD1306_WHITE);
+
+  String text = "WALL STREET";
+
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
+
+  // Center text under the icon
+  display.setCursor((SCREEN_WIDTH - w) / 2, 50);
   display.print(text);
 
   display.display();
@@ -577,6 +643,8 @@ void setup() {
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
   display.println(F("Starting..."));
+  showWallStreet();
+  delay(2000);
   display.display();
 
 
@@ -623,6 +691,7 @@ void loop() {
   } else {
 
     if (!head) {
+      showWallStreet();
       Serial.println("⚠️ Nessuno stock da mostrare. Passa in modalità SERVER per aggiungere i tuoi stock.");
       delay(3000);  // evita flooding della seriale
       return;
