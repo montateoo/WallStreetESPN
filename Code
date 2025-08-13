@@ -61,8 +61,11 @@ const int MARKET_OPEN_HOUR = 15;
 const int MARKET_OPEN_MINUTE = 30;
 const int MARKET_CLOSE_HOUR = 22;
 const int MARKET_CLOSE_MINUTE = 0;
-const long gmtOffset_sec = 2 * 3600;   // UTC+2 in seconds
-const int daylightOffset_sec = 0;       // ESP core handles daylight time manually if needed
+
+// NTP servers
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = 3600;   // CET is UTC+1
+const int   daylightOffset_sec = 3600; // +1 hour for CEST (DST)
 
 
 // Example 24x24 server icon bitmap
@@ -465,6 +468,63 @@ void handleNonBlockingFetch() {
   currentNode = currentNode->next;
 }
 
+void fetchSingleStock(String symbol) {
+    symbol.replace("/", "");
+    String apiKey = "d1vq1a9r01qmbi8phj8gd1vq1a9r01qmbi8phj90";
+    String url = "https://finnhub.io/api/v1/quote?symbol=" + symbol + "&token=" + apiKey;
+
+    WiFiClientSecure client;
+    client.setInsecure();
+
+    HTTPClient https;
+    Serial.println("🔎 Requesting: " + url);
+
+    if (https.begin(client, url)) {
+        https.addHeader("User-Agent", "Mozilla/5.0");
+        int httpCode = https.GET();
+
+        if (httpCode == HTTP_CODE_OK) {
+            String payload = https.getString();
+            DynamicJsonDocument doc(1024);
+            if (deserializeJson(doc, payload)) {
+                Serial.println("⚠️ JSON parsing error");
+            } else {
+                float currentPrice = doc["c"];
+                float prevClose = doc["pc"];
+                float percent = 0;
+                if (prevClose != 0) {
+                    percent = ((currentPrice - prevClose) / prevClose) * 100.0;
+                }
+
+                stockCache[symbol] = { currentPrice, percent };
+                Serial.printf("📥 %s: %.2f (%.2f%%)\n", symbol.c_str(), currentPrice, percent);
+            }
+        } else {
+            Serial.printf("⚠️ HTTP error: %d\n", httpCode);
+        }
+        https.end();
+    } else {
+        Serial.println("[HTTPS] Connection failed");
+    }
+}
+
+
+// Global map to track retries
+std::map<String, int> retryCount;
+
+StockData fetchSingleStockWithRetry(String symbol) {
+    StockData data = stockCache[symbol]; // start with cached data
+
+    for (int retry = 0; retry < 2; retry++) { // exactly 2 attempts max
+        if (data.currentPrice != 0) break;    // success, stop retrying
+        fetchSingleStock(symbol);             // updates stockCache
+        data = stockCache[symbol];            // refresh data
+        delay(150);                           // small wait between tries
+    }
+
+    return data; // even if still zero, return so display can skip to next
+}
+
 
 // === Gestione pulsante migliorata ===
 void checkButton() {
@@ -488,15 +548,13 @@ void checkButton() {
 }
 
 bool marketIsOpen() {
-    int currentHour = timeinfo.tm_hour;
-    int currentMinute = timeinfo.tm_min;
+    int currentMinutes = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+    int openMinutes = MARKET_OPEN_HOUR * 60 + MARKET_OPEN_MINUTE;
+    int closeMinutes = MARKET_CLOSE_HOUR * 60 + MARKET_CLOSE_MINUTE;
 
-    if (currentHour > MARKET_OPEN_HOUR && currentHour < MARKET_CLOSE_HOUR) return true;
-    if (currentHour == MARKET_OPEN_HOUR && currentMinute >= MARKET_OPEN_MINUTE) return true;
-    if (currentHour == MARKET_CLOSE_HOUR && currentMinute < MARKET_CLOSE_MINUTE) return true;
-
-    return false;
+    return currentMinutes >= openMinutes && currentMinutes < closeMinutes;
 }
+
 
 String getMarketCountdown() {
     int hoursLeft = MARKET_CLOSE_HOUR - timeinfo.tm_hour;
@@ -524,48 +582,53 @@ void updateDisplay() {
 
   if (millis() - lastDisplaySwitch >= displayInterval || firstRun) {
 
-if (showCountdown) {
-    display.clearDisplay();
+    if (showCountdown) {
+      display.clearDisplay();
 
-    // --- First line: OPENS or CLOSES ---
-    display.setFont(&FreeSansBold9pt7b);
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
+      // --- First line: OPENS or CLOSES ---
+      display.setFont(&FreeSansBold9pt7b);
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
 
-    String statusText = marketIsOpen() ? "CLOSES" : "OPENS"; // your own function/logic
-    int16_t x1, y1;
-    uint16_t w, h;
-    display.getTextBounds(statusText, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor((SCREEN_WIDTH - w) / 2, 20);
-    display.print(statusText);
+      String statusText = marketIsOpen() ? "CLOSES" : "OPENS"; // your own function/logic
+      int16_t x1, y1;
+      uint16_t w, h;
+      display.getTextBounds(statusText, 0, 0, &x1, &y1, &w, &h);
+      display.setCursor((SCREEN_WIDTH - w) / 2, 20);
+      display.print(statusText);
 
-    // --- Second line: countdown time ---
-    
-    String countdown = getMarketCountdown();
-    display.getTextBounds(countdown, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor((SCREEN_WIDTH - w) / 2, 45);
-    display.print(countdown);
+      // --- Second line: countdown time ---
+      String countdown = getMarketCountdown();
+      display.getTextBounds(countdown, 0, 0, &x1, &y1, &w, &h);
+      display.setCursor((SCREEN_WIDTH - w) / 2, 45);
+      display.print(countdown);
 
-    display.display();
+      display.display();
 
-    showCountdown = false;
-    lastDisplaySwitch = millis();
-    if (firstRun) firstRun = false;
-    return;
-}
+      showCountdown = false;
+      lastDisplaySwitch = millis();
+      if (firstRun) firstRun = false;
+      return;
+    }
 
     // Save old data for animation
     if (!firstRun) {
       oldSymbol = displayNode->data;
       oldSymbol.replace("/", "");
       if (stockCache.count(oldSymbol)) oldData = stockCache[oldSymbol];
+
+      // ✅ Fetch if oldData has no price
+      if (oldData.currentPrice == 0) {
+        oldData = fetchSingleStockWithRetry(oldSymbol);
+        stockCache[oldSymbol] = oldData;
+      }
     }
 
     // Advance to next stock
     displayNode = displayNode->next;
-    if (!displayNode){
-       displayNode = head;
-       configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.nist.gov");
+    if (!displayNode) {
+      displayNode = head;
+      configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.nist.gov");
     }
     lastDisplaySwitch = millis();
 
@@ -574,12 +637,20 @@ if (showCountdown) {
     StockData newData;
     if (stockCache.count(newSymbol)) newData = stockCache[newSymbol];
 
+    // ✅ Fetch if newData has no price
+    if (newData.currentPrice == 0) {
+      newData = fetchSingleStockWithRetry(newSymbol);
+      stockCache[newSymbol] = newData;
+    }
+
     if (firstRun) {
       drawStockFrame(newSymbol, newData, 0);
       display.display();
       firstRun = false;
       return;
     }
+
+    updateLEDs(newData);
 
     // Slide animation
     for (int offset = 0; offset <= 128; offset += 8) {
@@ -593,6 +664,7 @@ if (showCountdown) {
     showCountdown = true; // after showing a stock, next cycle will show countdown
   }
 }
+
 
 // Call this ONCE per stock change, not inside the animation loop
 void updateLEDs(StockData data) {
@@ -612,10 +684,13 @@ void drawStockFrame(String symbol, StockData data, int xOffset) {
     int16_t x1, y1;
     uint16_t w, h;
 
-    // Clear the ENTIRE frame area for this offset (prevents ghosting)
-    display.fillRect(xOffset, 0, 128, 64, SSD1306_BLACK);
-    updateLEDs(data);
+    // Fetch stock up to 2 times if price is zero
+    if (data.currentPrice == 0) {
+        data = fetchSingleStockWithRetry(symbol);
+    }
 
+    // Clear frame
+    display.fillRect(xOffset, 0, 128, 64, SSD1306_BLACK);
 
     // --- SYMBOL ---
     display.setFont(&FreeSansBold9pt7b);
@@ -638,7 +713,13 @@ void drawStockFrame(String symbol, StockData data, int xOffset) {
     display.getTextBounds(changeStr, 0, 0, &x1, &y1, &w, &h);
     display.setCursor(xOffset + (128 - w) / 2, 60);
     display.print(changeStr);
+
+    // Update LEDs
+    updateLEDs(data);
 }
+
+
+
 
 void showServerMode() {
   display.clearDisplay();
@@ -756,18 +837,20 @@ void setup() {
   digitalWrite(ledGreenPin, LOW);
   digitalWrite(ledRedPin, LOW);
 
-  // --- NTP Time Sync ---
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov"); // UTC
-  struct tm timeinfo;
-  while (!getLocalTime(&timeinfo)) {
+  // Initialize time
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+  // Wait for time to be set
+  while(!getLocalTime(&timeinfo)){
     Serial.println("Waiting for NTP time...");
     delay(1000);
   }
 
-  Serial.printf("Current time: %02d/%02d/%04d %02d:%02d:%02d\n",
-                timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900,
-                timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
-
+  Serial.println("Time synchronized!");
+  if (getLocalTime(&timeinfo)) {
+    Serial.printf("Local time: %02d:%02d:%02d\n", 
+                  timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+  }
 
   Serial.println("🟢 Avviato in modalità DISPLAY");
   newStock = true; //when turned on downloads new data
@@ -786,7 +869,7 @@ void loop() {
     showServerMode();
   } else {
     display.clearDisplay();
-
+    
     if (!head) {
       showWallStreet();
       Serial.println("⚠️ Nessuno stock da mostrare. Passa in modalità SERVER per aggiungere i tuoi stock.");
@@ -803,6 +886,7 @@ void loop() {
     }
 
     if (isFetching) {
+      showWallStreet();
       handleNonBlockingFetch();
       if(newStock){
        newStock = false;
