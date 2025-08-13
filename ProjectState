@@ -1,5 +1,10 @@
 TODO:
 
+the led are wflashing when sliding
+server mode don't disappears when in display
+pu add stock on inizializzation
+add a wifi display when setting new one
+correct the time of opening market
 box to view and modify the API key
 Vin for the esp8266
 PCB (keep the configuration spin are unusable during boot)
