@@ -592,11 +592,32 @@ String getMarketCountdown() {
 }
 
 
+// Slide animation: old -> new frame
+void slideFrames(
+    const String& oldSymbol, const StockData& oldData,
+    const String& newSymbol, const StockData& newData,
+    int width = 128, int height = 64, int step = 4, int delayTime = 20) 
+{
+  for (int offset = 0; offset <= width; offset += step) {
+    display.clearDisplay();
+
+    // old frame moves left (from 0 to -width)
+    drawStockFrame(oldSymbol, oldData, -offset);
+
+    // new frame moves left (from +width to 0)
+    drawStockFrame(newSymbol, newData, width - offset);
+
+    display.display();
+    delay(delayTime);
+  }
+}
+
+
 void updateDisplay() {
   static String oldSymbol = "";
   static StockData oldData;
   static bool firstRun = true;
-  static bool showCountdown = false; // NEW: alternates between countdown and stock
+  static bool showCountdown = false;
 
   if (!displayNode) displayNode = head;
   if (!displayNode) return;
@@ -611,7 +632,7 @@ void updateDisplay() {
       display.setTextSize(1);
       display.setTextColor(SSD1306_WHITE);
 
-      String statusText = marketIsOpen() ? "CLOSES" : "OPENS"; // your own function/logic
+      String statusText = marketIsOpen() ? "CLOSES" : "OPENS";
       int16_t x1, y1;
       uint16_t w, h;
       display.getTextBounds(statusText, 0, 0, &x1, &y1, &w, &h);
@@ -634,11 +655,10 @@ void updateDisplay() {
 
     // Save old data for animation
     if (!firstRun) {
-      oldSymbol = displayNode->data;
+      oldSymbol = String(displayNode->data);
       oldSymbol.replace("/", "");
       if (stockCache.count(oldSymbol)) oldData = stockCache[oldSymbol];
 
-      // ✅ Fetch if oldData has no price
       if (oldData.currentPrice == 0) {
         oldData = fetchSingleStockWithRetry(oldSymbol);
         stockCache[oldSymbol] = oldData;
@@ -649,21 +669,24 @@ void updateDisplay() {
     displayNode = displayNode->next;
     if (!displayNode) {
       displayNode = head;
-      configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.nist.gov");
+      getLocalTime(&timeinfo);
+      Serial.printf("Local time updated: %02d:%02d:%02d\n", 
+                  timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
     }
     lastDisplaySwitch = millis();
 
-    String newSymbol = displayNode->data;
+    // New stock data
+    String newSymbol = String(displayNode->data);
     newSymbol.replace("/", "");
     StockData newData;
     if (stockCache.count(newSymbol)) newData = stockCache[newSymbol];
 
-    // ✅ Fetch if newData has no price
     if (newData.currentPrice == 0) {
       newData = fetchSingleStockWithRetry(newSymbol);
       stockCache[newSymbol] = newData;
     }
 
+    // First run: just display without sliding
     if (firstRun) {
       drawStockFrame(newSymbol, newData, 0);
       display.display();
@@ -671,21 +694,16 @@ void updateDisplay() {
       return;
     }
 
+    // Update LEDs
     updateLEDs(newData);
 
-    // Slide animation
-    for (int offset = 0; offset <= 128; offset += 8) {
-      display.clearDisplay();
-      drawStockFrame(oldSymbol, oldData, -offset);
-      drawStockFrame(newSymbol, newData, 128 - offset);
-      display.display();
-      delay(20);
-    }
+    // Slide old -> new stock
+    slideFrames(oldSymbol, oldData, newSymbol, newData);
 
-    showCountdown = true; // after showing a stock, next cycle will show countdown
+    // Show countdown after sliding
+    showCountdown = true;
   }
 }
-
 
 // Call this ONCE per stock change, not inside the animation loop
 void updateLEDs(StockData data) {
@@ -704,9 +722,6 @@ void updateLEDs(StockData data) {
 void drawStockFrame(String symbol, StockData data, int xOffset) {
     int16_t x1, y1;
     uint16_t w, h;
-
-    // Clear the ENTIRE frame area for this offset (prevents ghosting)
-    display.fillRect(xOffset, 0, 128, 64, SSD1306_BLACK);
     
     // --- SYMBOL ---
     display.setFont(&FreeSansBold9pt7b);
