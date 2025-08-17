@@ -498,6 +498,11 @@ void fetchSingleStock(String symbol) {
 
                 stockCache[symbol] = { currentPrice, percent };
                 Serial.printf("📥 %s: %.2f (%.2f%%)\n", symbol.c_str(), currentPrice, percent);
+
+                // Optional: update display and LEDs immediately
+                drawStockFrame(symbol, stockCache[symbol], 0);
+                updateLEDs(stockCache[symbol]);
+                display.display();
             }
         } else {
             Serial.printf("⚠️ HTTP error: %d\n", httpCode);
@@ -555,21 +560,37 @@ bool marketIsOpen() {
     return currentMinutes >= openMinutes && currentMinutes < closeMinutes;
 }
 
-
 String getMarketCountdown() {
-    int hoursLeft = MARKET_CLOSE_HOUR - timeinfo.tm_hour;
-    int minutesLeft = MARKET_CLOSE_MINUTE - timeinfo.tm_min;
+    // Market hours in Italy (example: winter time)
+    const int MARKET_OPEN_HOUR = 15;
+    const int MARKET_OPEN_MINUTE = 30;
+    const int MARKET_CLOSE_HOUR = 22;
+    const int MARKET_CLOSE_MINUTE = 0;
 
-    if (minutesLeft < 0) {
-        minutesLeft += 60;
-        hoursLeft -= 1;
+    int currentMinutes = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+    int openMinutes    = MARKET_OPEN_HOUR * 60 + MARKET_OPEN_MINUTE;
+    int closeMinutes   = MARKET_CLOSE_HOUR * 60 + MARKET_CLOSE_MINUTE;
+
+    int targetMinutes;
+
+    if (currentMinutes < openMinutes) {
+        // before open → countdown to open
+        targetMinutes = openMinutes;
+    } else if (currentMinutes < closeMinutes) {
+        // after open, before close → countdown to close
+        targetMinutes = closeMinutes;
+    } else {
+        // after close → countdown to tomorrow’s open
+        targetMinutes = openMinutes + 24 * 60;
     }
 
-    if (hoursLeft < 0) hoursLeft = 0;
-    if (minutesLeft < 0) minutesLeft = 0;
+    int diff = targetMinutes - currentMinutes;
+    int hoursLeft = diff / 60;
+    int minutesLeft = diff % 60;
 
     return String(hoursLeft) + "h " + String(minutesLeft) + "m";
 }
+
 
 void updateDisplay() {
   static String oldSymbol = "";
@@ -684,14 +705,9 @@ void drawStockFrame(String symbol, StockData data, int xOffset) {
     int16_t x1, y1;
     uint16_t w, h;
 
-    // Fetch stock up to 2 times if price is zero
-    if (data.currentPrice == 0) {
-        data = fetchSingleStockWithRetry(symbol);
-    }
-
-    // Clear frame
+    // Clear the ENTIRE frame area for this offset (prevents ghosting)
     display.fillRect(xOffset, 0, 128, 64, SSD1306_BLACK);
-
+    
     // --- SYMBOL ---
     display.setFont(&FreeSansBold9pt7b);
     display.setTextSize(1);
@@ -713,12 +729,7 @@ void drawStockFrame(String symbol, StockData data, int xOffset) {
     display.getTextBounds(changeStr, 0, 0, &x1, &y1, &w, &h);
     display.setCursor(xOffset + (128 - w) / 2, 60);
     display.print(changeStr);
-
-    // Update LEDs
-    updateLEDs(data);
 }
-
-
 
 
 void showServerMode() {
