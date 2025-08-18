@@ -20,6 +20,8 @@
 #define OLED_RESET -1 // No reset pin
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
+uint8_t virtualBuffer[128 * 128 / 8];  
+
 // === Struttura della lista collegata ===
 struct Node {
   String data;
@@ -498,11 +500,6 @@ void fetchSingleStock(String symbol) {
 
                 stockCache[symbol] = { currentPrice, percent };
                 Serial.printf("📥 %s: %.2f (%.2f%%)\n", symbol.c_str(), currentPrice, percent);
-
-                // Optional: update display and LEDs immediately
-                drawStockFrame(symbol, stockCache[symbol], 0);
-                updateLEDs(stockCache[symbol]);
-                display.display();
             }
         } else {
             Serial.printf("⚠️ HTTP error: %d\n", httpCode);
@@ -513,7 +510,6 @@ void fetchSingleStock(String symbol) {
     }
 }
 
-
 // Global map to track retries
 std::map<String, int> retryCount;
 
@@ -522,14 +518,13 @@ StockData fetchSingleStockWithRetry(String symbol) {
 
     for (int retry = 0; retry < 2; retry++) { // exactly 2 attempts max
         if (data.currentPrice != 0) break;    // success, stop retrying
-        fetchSingleStock(symbol);             // updates stockCache
+        fetchSingleStock(symbol);             // updates stockCache (no drawing)
         data = stockCache[symbol];            // refresh data
         delay(150);                           // small wait between tries
     }
 
     return data; // even if still zero, return so display can skip to next
 }
-
 
 // === Gestione pulsante migliorata ===
 void checkButton() {
@@ -591,27 +586,114 @@ String getMarketCountdown() {
     return String(hoursLeft) + "h " + String(minutesLeft) + "m";
 }
 
+void blitWindowToDisplay(int yOffset) {
+  uint8_t* dispBuf = display.getBuffer();
+  memset(dispBuf, 0, 1024);
 
-// Slide animation: old -> new frame
+  for (int y = 0; y < 64; y++) {
+    int srcY = y + yOffset;
+    if (srcY < 0 || srcY >= 128) continue;
+
+    for (int x = 0; x < 128; x++) {
+      // --- read from virtual buffer (linear) ---
+      int srcIndex = srcY * 128 + x;
+      int srcByte = srcIndex / 8;
+      int srcBit = 7 - (srcIndex % 8);
+      bool pixel = (virtualBuffer[srcByte] >> srcBit) & 0x01;
+
+      if (pixel) {
+        // --- write into Adafruit buffer (paged) ---
+        int dstIndex = x + (y / 8) * 128;
+        dispBuf[dstIndex] |= (1 << (y & 7));
+      }
+    }
+  }
+}
+
+
+// Helper: clear virtual buffer
+void clearVirtualBuffer() {
+  memset(virtualBuffer, 0, sizeof(virtualBuffer));
+}
+
+
+
+
+// Wrapper: draw into virtual buffer at yOffset
+void drawStockFrameToVirtual(String symbol, StockData data, int yOffset) {
+  display.clearDisplay();
+  drawStockFrame(symbol, data, 0);   // draw into SSD1306 buffer
+  uint8_t* src = display.getBuffer();
+
+  for (int y = 0; y < 64; y++) {
+    int dstY = y + yOffset;
+    if (dstY >= 128) continue;
+
+    for (int x = 0; x < 128; x++) {
+      // --- read from Adafruit buffer ---
+      int srcIndex = x + (y / 8) * 128;
+      bool pixel = (src[srcIndex] >> (y & 7)) & 0x1;
+
+      if (pixel) {
+        // --- write into virtual buffer (linear 1bpp) ---
+        int dstIndex = dstY * 128 + x;
+        int dstByte = dstIndex / 8;
+        int dstBit = 7 - (dstIndex % 8);   // MSB first
+        virtualBuffer[dstByte] |= (1 << dstBit);
+      }
+    }
+  }
+}
+
+
+// Vertical slide animation using virtual 128x128 framebuffer
+void slideFramesVertical(
+    const String& oldSymbol, const StockData& oldData,
+    const String& newSymbol, const StockData& newData,
+    int step = 4, int delayTime = 20) 
+{
+  clearVirtualBuffer();
+
+  // Draw old frame in top half
+  drawStockFrameToVirtual(oldSymbol, oldData, 0);
+
+  // Draw new frame in bottom half
+  drawStockFrameToVirtual(newSymbol, newData, 64);
+
+  // Animate scrolling from y=0..64
+  for (int offset = 0; offset <= 64; offset += step) {
+    blitWindowToDisplay(offset);
+    display.display();
+    delay(delayTime);
+  }
+}
+
+// Slide animation: old -> new frame (push effect, no ghost overlap)
 void slideFrames(
     const String& oldSymbol, const StockData& oldData,
     const String& newSymbol, const StockData& newData,
     int width = 128, int height = 64, int step = 4, int delayTime = 20) 
 {
   for (int offset = 0; offset <= width; offset += step) {
+    if (offset > width) offset = width; // safety if step doesn't divide width
+
     display.clearDisplay();
 
-    // old frame moves left (from 0 to -width)
-    drawStockFrame(oldSymbol, oldData, -offset);
+    // Old frame: draw only while it's still on screen
+    if (offset < width) {
+      drawStockFrame(oldSymbol, oldData, -offset);
+    }
 
-    // new frame moves left (from +width to 0)
-    drawStockFrame(newSymbol, newData, width - offset);
+    // New frame: draw only when any part is visible
+    int newX = width - offset;
+    if (newX < width) {
+      drawStockFrame(newSymbol, newData, newX);
+    }
 
     display.display();
     delay(delayTime);
   }
 }
-
 
 void updateDisplay() {
   static String oldSymbol = "";
@@ -669,6 +751,8 @@ void updateDisplay() {
     displayNode = displayNode->next;
     if (!displayNode) {
       displayNode = head;
+      // Show countdown after sliding
+      showCountdown = true;
       getLocalTime(&timeinfo);
       Serial.printf("Local time updated: %02d:%02d:%02d\n", 
                   timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
@@ -698,10 +782,8 @@ void updateDisplay() {
     updateLEDs(newData);
 
     // Slide old -> new stock
-    slideFrames(oldSymbol, oldData, newSymbol, newData);
+    slideFramesVertical(oldSymbol, oldData, newSymbol, newData);
 
-    // Show countdown after sliding
-    showCountdown = true;
   }
 }
 
@@ -722,30 +804,39 @@ void updateLEDs(StockData data) {
 void drawStockFrame(String symbol, StockData data, int xOffset) {
     int16_t x1, y1;
     uint16_t w, h;
-    
+
+    // Don’t draw if frame is completely off-screen
+    if (xOffset <= -SCREEN_WIDTH || xOffset >= SCREEN_WIDTH) return;
+
     // --- SYMBOL ---
     display.setFont(&FreeSansBold9pt7b);
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
+
     display.getTextBounds(symbol, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(xOffset + (128 - w) / 2, h + 4);
+    int symbolX = (SCREEN_WIDTH - w) / 2 + xOffset;
+    int symbolY = h + 4;
+    display.setCursor(symbolX, symbolY);
     display.print(symbol);
 
     // --- PRICE ---
     display.setFont(&FreeSansBold12pt7b);
     String priceStr = "$ " + String(data.currentPrice, 2);
     display.getTextBounds(priceStr, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(xOffset + (128 - w) / 2, 40);
+    int priceX = (SCREEN_WIDTH - w) / 2 + xOffset;
+    int priceY = 40;  
+    display.setCursor(priceX, priceY);
     display.print(priceStr);
 
-    // --- PERCENT CHANGE ---
+    // --- PERCENT ---
     display.setFont(&FreeSansBold9pt7b);
     String changeStr = String(data.percent, 2) + " %";
     display.getTextBounds(changeStr, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(xOffset + (128 - w) / 2, 60);
+    int changeX = (SCREEN_WIDTH - w) / 2 + xOffset;
+    int changeY = 60;
+    display.setCursor(changeX, changeY);
     display.print(changeStr);
 }
-
 
 void showServerMode() {
   display.clearDisplay();
