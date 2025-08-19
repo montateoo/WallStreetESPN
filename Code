@@ -11,18 +11,15 @@
 #include <Adafruit_SSD1306.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
-#include <TimeLib.h>
-
-#define SCREEN_WIDTH 128 // OLED width, in pixels
-#define SCREEN_HEIGHT 64 // OLED height, in pixels
 
 // I2C pins for ESP8266 (D1 = SCL, D2 = SDA)
+#define SCREEN_WIDTH 128 // OLED width, in pixels
+#define SCREEN_HEIGHT 64 // OLED height, in pixels
 #define OLED_RESET -1 // No reset pin
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+uint8_t virtualBuffer[2048]; // 256 x 64 bits
 
-uint8_t virtualBuffer[128 * 128 / 8];  
-
-// === Struttura della lista collegata ===
+// === Struttura della linked list ===
 struct Node {
   String data;
   Node* next;
@@ -64,6 +61,11 @@ const int MARKET_OPEN_MINUTE = 30;
 const int MARKET_CLOSE_HOUR = 22;
 const int MARKET_CLOSE_MINUTE = 0;
 
+// Previous countdown text (for sliding animation)
+String prevStatus = "";
+String prevCountdown = "";
+
+
 // NTP servers
 const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = 3600;   // CET is UTC+1
@@ -84,7 +86,7 @@ const unsigned char PROGMEM serverIcon[] = {
 
 // New 24x24 stock market arrow up icon bitmap (monochrome)
 const unsigned char PROGMEM dollarIcon[] = {
-   0x00,0x20,0x00,
+  0x00,0x20,0x00,
   0x00,0x70,0x00,
   0x01,0xF8,0x00,
   0x03,0xFC,0x00,
@@ -109,8 +111,6 @@ const unsigned char PROGMEM dollarIcon[] = {
   0x00,0x00,0x00,
   0x00,0x00,0x00
 };
-
-
 
 ESP8266WebServer server(80);
 
@@ -229,7 +229,6 @@ void loadListFromFS() {
     Serial.println("⚠️ File vuoto o nessun dato valido");
   }
 }
-
 
 // === Web Server ===
 void handleRoot() {
@@ -510,9 +509,6 @@ void fetchSingleStock(String symbol) {
     }
 }
 
-// Global map to track retries
-std::map<String, int> retryCount;
-
 StockData fetchSingleStockWithRetry(String symbol) {
     StockData data = stockCache[symbol]; // start with cached data
 
@@ -586,23 +582,24 @@ String getMarketCountdown() {
     return String(hoursLeft) + "h " + String(minutesLeft) + "m";
 }
 
-void blitWindowToDisplay(int yOffset) {
+// Blit 128x64 window at horizontal offset into SSD1306 buffer
+void blitWindowToDisplay(int xOffset) {
   uint8_t* dispBuf = display.getBuffer();
   memset(dispBuf, 0, 1024);
 
   for (int y = 0; y < 64; y++) {
-    int srcY = y + yOffset;
-    if (srcY < 0 || srcY >= 128) continue;
-
     for (int x = 0; x < 128; x++) {
-      // --- read from virtual buffer (linear) ---
-      int srcIndex = srcY * 128 + x;
+      int srcX = x + xOffset;
+      if (srcX < 0 || srcX >= 256) continue; // virtual buffer is 256 wide
+
+      // --- read from virtual buffer (linear 256x64 1bpp) ---
+      int srcIndex = y * 256 + srcX;
       int srcByte = srcIndex / 8;
       int srcBit = 7 - (srcIndex % 8);
       bool pixel = (virtualBuffer[srcByte] >> srcBit) & 0x01;
 
       if (pixel) {
-        // --- write into Adafruit buffer (paged) ---
+        // --- write into Adafruit buffer (paged 128x64) ---
         int dstIndex = x + (y / 8) * 128;
         dispBuf[dstIndex] |= (1 << (y & 7));
       }
@@ -610,33 +607,29 @@ void blitWindowToDisplay(int yOffset) {
   }
 }
 
-
 // Helper: clear virtual buffer
 void clearVirtualBuffer() {
   memset(virtualBuffer, 0, sizeof(virtualBuffer));
 }
 
-
-
-
-// Wrapper: draw into virtual buffer at yOffset
-void drawStockFrameToVirtual(String symbol, StockData data, int yOffset) {
+// Wrapper: draw into virtual buffer at xOffset
+void drawStockFrameToVirtual(String symbol, StockData data, int xOffset) {
   display.clearDisplay();
   drawStockFrame(symbol, data, 0);   // draw into SSD1306 buffer
   uint8_t* src = display.getBuffer();
 
   for (int y = 0; y < 64; y++) {
-    int dstY = y + yOffset;
-    if (dstY >= 128) continue;
-
     for (int x = 0; x < 128; x++) {
+      int dstX = x + xOffset;
+      if (dstX >= 128*2) continue; // virtual buffer is 256px wide
+
       // --- read from Adafruit buffer ---
       int srcIndex = x + (y / 8) * 128;
       bool pixel = (src[srcIndex] >> (y & 7)) & 0x1;
 
       if (pixel) {
         // --- write into virtual buffer (linear 1bpp) ---
-        int dstIndex = dstY * 128 + x;
+        int dstIndex = y * 256 + dstX;  // now width is 256
         int dstByte = dstIndex / 8;
         int dstBit = 7 - (dstIndex % 8);   // MSB first
         virtualBuffer[dstByte] |= (1 << dstBit);
@@ -645,51 +638,107 @@ void drawStockFrameToVirtual(String symbol, StockData data, int yOffset) {
   }
 }
 
-
-// Vertical slide animation using virtual 128x128 framebuffer
-void slideFramesVertical(
+// Horizontal slide animation using virtual 256x64 framebuffer
+void slideFramesHorizontal(
     const String& oldSymbol, const StockData& oldData,
     const String& newSymbol, const StockData& newData,
     int step = 4, int delayTime = 20) 
 {
   clearVirtualBuffer();
 
-  // Draw old frame in top half
+  // Draw old frame in left half
   drawStockFrameToVirtual(oldSymbol, oldData, 0);
 
-  // Draw new frame in bottom half
-  drawStockFrameToVirtual(newSymbol, newData, 64);
+  // Draw new frame in right half
+  drawStockFrameToVirtual(newSymbol, newData, 128);
 
-  // Animate scrolling from y=0..64
-  for (int offset = 0; offset <= 64; offset += step) {
+  // Animate scrolling from x=0..128
+  for (int offset = 0; offset <= 128; offset += step) {
     blitWindowToDisplay(offset);
     display.display();
     delay(delayTime);
   }
 }
 
-// Slide animation: old -> new frame (push effect, no ghost overlap)
-void slideFrames(
-    const String& oldSymbol, const StockData& oldData,
-    const String& newSymbol, const StockData& newData,
-    int width = 128, int height = 64, int step = 4, int delayTime = 20) 
+void drawCountdownFrame(const String& statusText, const String& countdown) {
+  display.clearDisplay();
+  
+  // First line: OPENS / CLOSES
+  display.setFont(&FreeSansBold9pt7b);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(statusText, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2, 20);
+  display.print(statusText);
+
+  // Second line: countdown
+  display.getTextBounds(countdown, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2, 45);
+  display.print(countdown);
+}
+
+void drawCountdownToVirtual(int xOffset) {
+  display.clearDisplay();
+
+  String statusText = marketIsOpen() ? "CLOSES" : "OPENS";
+  String countdown = getMarketCountdown();
+
+  // First line: OPENS / CLOSES
+  display.setFont(&FreeSansBold9pt7b);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(statusText, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2, 20);
+  display.print(statusText);
+
+  // Second line: countdown
+  display.getTextBounds(countdown, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2, 45);
+  display.print(countdown);
+
+  // Copy SSD1306 buffer into virtual buffer at xOffset
+  uint8_t* src = display.getBuffer();
+  for (int y = 0; y < 64; y++) {
+    for (int x = 0; x < 128; x++) {
+      int dstX = x + xOffset;
+      if (dstX >= 256) continue;
+
+      int srcIndex = x + (y / 8) * 128;
+      bool pixel = (src[srcIndex] >> (y & 7)) & 0x1;
+
+      if (pixel) {
+        int dstIndex = y * 256 + dstX;
+        int dstByte = dstIndex / 8;
+        int dstBit = 7 - (dstIndex % 8);
+        virtualBuffer[dstByte] |= (1 << dstBit);
+      }
+    }
+  }
+}
+
+
+void slideCountdown(
+    const String& oldStatus, const String& oldCountdown,
+    const String& newStatus, const String& newCountdown,
+    int step = 4, int delayTime = 20)
 {
-  for (int offset = 0; offset <= width; offset += step) {
-    if (offset > width) offset = width; // safety if step doesn't divide width
+  clearVirtualBuffer();
 
-    display.clearDisplay();
+  // Old frame (left side)
+  drawCountdownToVirtual(oldStatus, oldCountdown, 0);
 
-    // Old frame: draw only while it's still on screen
-    if (offset < width) {
-      drawStockFrame(oldSymbol, oldData, -offset);
-    }
+  // New frame (right side)
+  drawCountdownToVirtual(newStatus, newCountdown, 64);
 
-    // New frame: draw only when any part is visible
-    int newX = width - offset;
-    if (newX < width) {
-      drawStockFrame(newSymbol, newData, newX);
-    }
-
+  // Animate horizontal scroll
+  for (int offset = 0; offset <= 128; offset += step) {
+    blitWindowToDisplay(offset);
     display.display();
     delay(delayTime);
   }
@@ -707,33 +756,26 @@ void updateDisplay() {
   if (millis() - lastDisplaySwitch >= displayInterval || firstRun) {
 
     if (showCountdown) {
-      display.clearDisplay();
+    String statusText = marketIsOpen() ? "CLOSES" : "OPENS";
+    String countdown = getMarketCountdown();
 
-      // --- First line: OPENS or CLOSES ---
-      display.setFont(&FreeSansBold9pt7b);
-      display.setTextSize(1);
-      display.setTextColor(SSD1306_WHITE);
-
-      String statusText = marketIsOpen() ? "CLOSES" : "OPENS";
-      int16_t x1, y1;
-      uint16_t w, h;
-      display.getTextBounds(statusText, 0, 0, &x1, &y1, &w, &h);
-      display.setCursor((SCREEN_WIDTH - w) / 2, 20);
-      display.print(statusText);
-
-      // --- Second line: countdown time ---
-      String countdown = getMarketCountdown();
-      display.getTextBounds(countdown, 0, 0, &x1, &y1, &w, &h);
-      display.setCursor((SCREEN_WIDTH - w) / 2, 45);
-      display.print(countdown);
-
-      display.display();
-
-      showCountdown = false;
-      lastDisplaySwitch = millis();
-      if (firstRun) firstRun = false;
-      return;
+    if (firstRun) {
+        drawCountdownFrame(statusText, countdown);
+        display.display();
+        firstRun = false;
+    } else {
+        slideCountdown(prevStatus, prevCountdown, statusText, countdown);
     }
+
+    // Save for next frame
+    prevStatus = statusText;
+    prevCountdown = countdown;
+
+    showCountdown = false;
+    lastDisplaySwitch = millis();
+    return;
+   }
+
 
     // Save old data for animation
     if (!firstRun) {
@@ -782,7 +824,7 @@ void updateDisplay() {
     updateLEDs(newData);
 
     // Slide old -> new stock
-    slideFramesVertical(oldSymbol, oldData, newSymbol, newData);
+     slideFramesHorizontal(oldSymbol, oldData, newSymbol, newData);
 
   }
 }
