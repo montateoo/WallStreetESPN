@@ -114,6 +114,10 @@ const unsigned char PROGMEM dollarIcon[] = {
 
 ESP8266WebServer server(80);
 
+void drawStockFrame(String symbol, StockData data, int xOffset);
+void updateLEDs(StockData data);
+
+
 // === Funzioni Lista Collegata ===
 void addNode(String value) {
   if (value == "") return;
@@ -680,29 +684,69 @@ void drawCountdownFrame(const String& statusText, const String& countdown) {
   display.print(countdown);
 }
 
-void drawCountdownToVirtual(int xOffset) {
+void slideStockToCountdown(
+    const String& symbol, const StockData& data,
+    const String& statusText, const String& countdown,
+    int step = 4, int delayTime = 20) 
+{
+  clearVirtualBuffer();
+
+  // Stock a sinistra
+  drawStockFrameToVirtual(symbol, data, 0);
+
+  // Countdown a destra
+  drawCountdownFrameVirtual(statusText, countdown, 128);
+
+  // Scroll
+  for (int offset = 0; offset <= 128; offset += step) {
+    blitWindowToDisplay(offset);
+    display.display();
+    delay(delayTime);
+  }
+}
+
+void slideCountdownToStock(
+    const String& statusText, const String& countdown,
+    const String& symbol, const StockData& data,
+    int step = 4, int delayTime = 20) 
+{
+  clearVirtualBuffer();
+
+  // Countdown a sinistra
+  drawCountdownFrameVirtual(statusText, countdown, 0);
+
+  // Stock a destra
+  drawStockFrameToVirtual(symbol, data, 128);
+
+  // Scroll
+  for (int offset = 0; offset <= 128; offset += step) {
+    blitWindowToDisplay(offset);
+    display.display();
+    delay(delayTime);
+  }
+}
+
+void drawCountdownFrameVirtual(const String& statusText, const String& countdown, int xOffset) {
   display.clearDisplay();
 
-  String statusText = marketIsOpen() ? "CLOSES" : "OPENS";
-  String countdown = getMarketCountdown();
-
-  // First line: OPENS / CLOSES
   display.setFont(&FreeSansBold9pt7b);
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
   int16_t x1, y1;
   uint16_t w, h;
+
+  // Prima riga
   display.getTextBounds(statusText, 0, 0, &x1, &y1, &w, &h);
   display.setCursor((SCREEN_WIDTH - w) / 2, 20);
   display.print(statusText);
 
-  // Second line: countdown
+  // Seconda riga
   display.getTextBounds(countdown, 0, 0, &x1, &y1, &w, &h);
   display.setCursor((SCREEN_WIDTH - w) / 2, 45);
   display.print(countdown);
 
-  // Copy SSD1306 buffer into virtual buffer at xOffset
+  // Copia nel virtual buffer
   uint8_t* src = display.getBuffer();
   for (int y = 0; y < 64; y++) {
     for (int x = 0; x < 128; x++) {
@@ -722,6 +766,45 @@ void drawCountdownToVirtual(int xOffset) {
   }
 }
 
+void drawCountdownToVirtual(const String& statusText, const String& countdown, int xOffset) {
+  display.clearDisplay();
+
+  display.setFont(&FreeSansBold9pt7b);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  int16_t x1, y1;
+  uint16_t w, h;
+
+  // Prima riga: OPENS / CLOSES
+  display.getTextBounds(statusText, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2, 20);
+  display.print(statusText);
+
+  // Seconda riga: countdown
+  display.getTextBounds(countdown, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2, 45);
+  display.print(countdown);
+
+  // Copia nel virtual buffer
+  uint8_t* src = display.getBuffer();
+  for (int y = 0; y < 64; y++) {
+    for (int x = 0; x < 128; x++) {
+      int dstX = x + xOffset;
+      if (dstX >= 256) continue;
+
+      int srcIndex = x + (y / 8) * 128;
+      bool pixel = (src[srcIndex] >> (y & 7)) & 0x1;
+
+      if (pixel) {
+        int dstIndex = y * 256 + dstX;
+        int dstByte = dstIndex / 8;
+        int dstBit = 7 - (dstIndex % 8);
+        virtualBuffer[dstByte] |= (1 << dstBit);
+      }
+    }
+  }
+}
 
 void slideCountdown(
     const String& oldStatus, const String& oldCountdown,
@@ -745,89 +828,100 @@ void slideCountdown(
 }
 
 void updateDisplay() {
-  static String oldSymbol = "";
-  static StockData oldData;
-  static bool firstRun = true;
-  static bool showCountdown = false;
+    static String oldSymbol = "";
+    static StockData oldData;
+    static bool firstRun = true;
+    static bool firstStockDisplayed = false; // NEW
+    static bool showCountdown = false;
 
-  if (!displayNode) displayNode = head;
-  if (!displayNode) return;
+    if (!displayNode) displayNode = head;
+    if (!displayNode) return;
 
-  if (millis() - lastDisplaySwitch >= displayInterval || firstRun) {
-
-    if (showCountdown) {
     String statusText = marketIsOpen() ? "CLOSES" : "OPENS";
     String countdown = getMarketCountdown();
 
-    if (firstRun) {
-        drawCountdownFrame(statusText, countdown);
-        display.display();
-        firstRun = false;
-    } else {
-        slideCountdown(prevStatus, prevCountdown, statusText, countdown);
+    // Check if it’s time to switch
+    if (millis() - lastDisplaySwitch < displayInterval && !firstRun) {
+        return;
     }
 
-    // Save for next frame
-    prevStatus = statusText;
-    prevCountdown = countdown;
+    lastDisplaySwitch = millis(); // reset timer
 
-    showCountdown = false;
-    lastDisplaySwitch = millis();
-    return;
-   }
-
-
-    // Save old data for animation
-    if (!firstRun) {
-      oldSymbol = String(displayNode->data);
-      oldSymbol.replace("/", "");
-      if (stockCache.count(oldSymbol)) oldData = stockCache[oldSymbol];
-
-      if (oldData.currentPrice == 0) {
-        oldData = fetchSingleStockWithRetry(oldSymbol);
-        stockCache[oldSymbol] = oldData;
-      }
+    // --- Prepare old stock data ---
+    if (!firstRun && !showCountdown && firstStockDisplayed) {
+        oldSymbol = String(displayNode->data);
+        oldSymbol.replace("/", "");
+        if (stockCache.count(oldSymbol)) oldData = stockCache[oldSymbol];
+        if (oldData.currentPrice == 0) {
+            oldData = fetchSingleStockWithRetry(oldSymbol);
+            stockCache[oldSymbol] = oldData;
+        }
     }
 
-    // Advance to next stock
+    // --- Advance to next stock ---
     displayNode = displayNode->next;
     if (!displayNode) {
-      displayNode = head;
-      // Show countdown after sliding
-      showCountdown = true;
-      getLocalTime(&timeinfo);
-      Serial.printf("Local time updated: %02d:%02d:%02d\n", 
-                  timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+        displayNode = head;
+        showCountdown = true; // show countdown after full cycle
+        getLocalTime(&timeinfo);
+        Serial.printf("Local time updated: %02d:%02d:%02d\n", 
+                      timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
     }
-    lastDisplaySwitch = millis();
 
-    // New stock data
+    // --- Prepare new stock data ---
     String newSymbol = String(displayNode->data);
     newSymbol.replace("/", "");
     StockData newData;
     if (stockCache.count(newSymbol)) newData = stockCache[newSymbol];
-
     if (newData.currentPrice == 0) {
-      newData = fetchSingleStockWithRetry(newSymbol);
-      stockCache[newSymbol] = newData;
+        newData = fetchSingleStockWithRetry(newSymbol);
+        stockCache[newSymbol] = newData;
     }
 
-    // First run: just display without sliding
+    // --- First run: draw first stock ---
     if (firstRun) {
-      drawStockFrame(newSymbol, newData, 0);
-      display.display();
-      firstRun = false;
-      return;
+        drawStockFrame(newSymbol, newData, 0);
+        display.display();
+        firstRun = false;
+        firstStockDisplayed = true; // mark that first stock is displayed
+        // Do NOT set oldSymbol/oldData yet — it will be set after countdown
+        return;
     }
 
-    // Update LEDs
+    // --- Countdown transition ---
+    if (showCountdown) {
+        if (!firstStockDisplayed) {
+            // First stock never displayed? just draw it after countdown
+            drawCountdownFrame(statusText, countdown);
+            display.display();
+            firstStockDisplayed = true;
+        } else {
+            // slide countdown → stock
+            slideStockToCountdown(oldSymbol, oldData, statusText, countdown);
+        }
+        // Save countdown info for next slide back
+        prevStatus = statusText;
+        prevCountdown = countdown;
+        showCountdown = false;
+
+        // For next stock slide, oldStock is now the first stock
+        oldSymbol = newSymbol;
+        oldData = newData;
+        return;
+    }
+
+    // --- Update LEDs ---
     updateLEDs(newData);
 
-    // Slide old -> new stock
-     slideFramesHorizontal(oldSymbol, oldData, newSymbol, newData);
+    // --- Slide old stock -> new stock ---
+    slideFramesHorizontal(oldSymbol, oldData, newSymbol, newData);
 
-  }
+    // --- Save current stock as old for next cycle ---
+    oldSymbol = newSymbol;
+    oldData = newData;
 }
+
+
 
 // Call this ONCE per stock change, not inside the animation loop
 void updateLEDs(StockData data) {
