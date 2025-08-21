@@ -11,6 +11,7 @@
 #include <Adafruit_SSD1306.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
+#include <Fonts/FreeSans9pt7b.h>
 
 // I2C pins for ESP8266 (D1 = SCL, D2 = SDA)
 #define SCREEN_WIDTH 128 // OLED width, in pixels
@@ -1112,22 +1113,61 @@ void blinkLedsInServerMode() {
   }
 }
 
+void progressBar(int percentage)
+{
+  display.clearDisplay();
+
+  // Cornice della progress bar
+  display.drawRect(7, 24, 114, 17, WHITE);
+  display.drawRect(6, 23, 116, 19, WHITE);
+
+  // Barra proporzionale alla percentuale
+  int barWidth = (percentage * 110) / 100;  // max 110 px
+  display.fillRect(9, 26, barWidth, 13, WHITE);
+
+  // Titolo "STARTING"
+  display.setFont(&FreeSans9pt7b);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(20, 15);   // centrato sopra la barra
+  display.print("STARTING");
+
+  // Percentuale grande sotto
+  display.setFont(&FreeSansBold12pt7b);
+  display.setTextColor(WHITE);
+  display.setCursor(40, 60);   // centrato sotto la barra
+  display.print(percentage);
+  display.print("%");
+
+  display.display();
+  delay(2000);
+}
+
+
+
 // === Setup ===
 void setup() {
   Serial.begin(115200);
+
+  //10%
+  //progressBar(10);
 
   if (!LittleFS.begin()) {
     Serial.println("LittleFS mount failed");
     return;
   }
 
+  //20%
+  //progressBar(20);
   Wire.begin(D2, D1); // SDA, SCL
  
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3C for most OLEDs
     Serial.println(F("SSD1306 allocation failed"));
     for (;;); // Don't proceed, loop forever
   }
-
+  
+  //30%
+  progressBar(30);
   // --- Show WiFi icon at startup ---
   display.clearDisplay();
   display.drawBitmap(32, 0, wifiDraw, 64, 64, SSD1306_WHITE);
@@ -1141,6 +1181,8 @@ void setup() {
     ESP.restart();
   } 
 
+  //40%
+  progressBar(40);
   // --- At this point autoConnect returned successfully ---
   if (WiFi.getMode() == WIFI_AP) {
     // AP mode active: keep WiFi icon
@@ -1152,6 +1194,8 @@ void setup() {
     Serial.println(WiFi.localIP());
   }
 
+  //50%
+  progressBar(50);
   // --- Load stocks from FS ---
   loadListFromFS();
 
@@ -1162,6 +1206,8 @@ void setup() {
   server.on("/clear", handleClear);
   server.on("/setkey", handleSetKey);
 
+  //60%
+  progressBar(60);
   server.begin();
 
   // --- Pins ---
@@ -1172,6 +1218,8 @@ void setup() {
   digitalWrite(ledGreenPin, LOW);
   digitalWrite(ledRedPin, LOW);
 
+  //70%
+  progressBar(70);
   // --- Initialize time ---
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
   while(!getLocalTime(&timeinfo)){
@@ -1179,12 +1227,16 @@ void setup() {
     delay(1000);
   }
 
+  //)90%
+  progressBar(90);
   Serial.println("Time synchronized!");
   if (getLocalTime(&timeinfo)) {
     Serial.printf("Local time: %02d:%02d:%02d\n", 
                   timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
   }
 
+  //100%
+  progressBar(100);
   Serial.println("🟢 Avviato in modalità DISPLAY");
   newStock = true; //when turned on downloads new data
 }
