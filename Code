@@ -1140,16 +1140,42 @@ void progressBar(int percentage)
   display.print("%");
 
   display.display();
+
+  digitalWrite(ledGreenPin, HIGH);    
   delay(2000);
+  digitalWrite(ledRedPin, LOW);
 }
 
+void showFirstStart()
+{
+  display.clearDisplay();
 
+  display.setFont(&FreeSans9pt7b);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  // Messaggio "NO DATA"
+  display.setCursor(25, 25);
+  display.print("NO DATA");
+
+  // Messaggio "SWITCHING MODE"
+  display.setCursor(5, 55);
+  display.print("SWITCHING");
+
+  display.display();
+}
 
 // === Setup ===
 void setup() {
   Serial.begin(115200);
 
   //10%
+  pinMode(buttonPin, INPUT);  
+  pinMode(wifiResetButtonPin, INPUT);
+  pinMode(ledGreenPin, OUTPUT);
+  pinMode(ledRedPin, OUTPUT);
+  digitalWrite(ledGreenPin, LOW);
+  digitalWrite(ledRedPin, LOW);
   //progressBar(10);
 
   if (!LittleFS.begin()) {
@@ -1209,14 +1235,6 @@ void setup() {
   //60%
   progressBar(60);
   server.begin();
-
-  // --- Pins ---
-  pinMode(buttonPin, INPUT);  
-  pinMode(wifiResetButtonPin, INPUT);
-  pinMode(ledGreenPin, OUTPUT);
-  pinMode(ledRedPin, OUTPUT);
-  digitalWrite(ledGreenPin, LOW);
-  digitalWrite(ledRedPin, LOW);
 
   //70%
   progressBar(70);
@@ -1286,7 +1304,10 @@ void loop() {
     if (!head) {
       showWallStreet();
       Serial.println("⚠️ No stocks to display. Use SERVER mode to add.");
-      delay(3000);
+      delay(4000);
+      showFirstStart();
+      delay(4000);
+      serverMode = true;
       return;
     }
 
