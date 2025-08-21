@@ -70,7 +70,7 @@ int stockNum = 0;
 
 Node* displayNode = nullptr;
 unsigned long lastDisplaySwitch = 0;
-const unsigned long displayInterval = 5000; // 5 sec
+unsigned long displayInterval = 5000; // 5 sec
 bool newStock = false;
 
 // Example market hours (NY Stock Exchange)
@@ -432,6 +432,12 @@ void handleRoot() {
         <input type='text' name='key' value=')rawliteral" + apiKey + R"rawliteral(' class='text-input'>
         <button type='submit' class='blue-button'>Save</button>
       </form>
+
+      <h3>Display Time per Stock</h3>
+      <form action='/settime'>
+        <input type='number' name='time' min='0' value=')rawliteral" + String(displayInterval/1000) + R"rawliteral(' class='text-input'>
+        <button type='submit' class='blue-button'>Save</button>
+      </form>
     </div>
   )rawliteral";
 
@@ -464,7 +470,24 @@ void handleSetKey() {
   server.send(303); // redirect back to root
 }
 
+void handleSetTime() {
+  if (server.hasArg("time")) {
+    int newTime = server.arg("time").toInt();
 
+    int stockCount = stockNum;
+    if (stockCount == 0) stockCount = 1; // avoid divide-by-zero
+
+    // Constraint: newTime >= 0 and newTime * stockCount <= 60000
+    if ((newTime * 1000) >= 0 && (newTime * stockCount * 1000) <= 600000) {
+      displayInterval = newTime*1000;
+      server.send(200, "text/html", "Display time updated! <a href='/'>Back</a>");
+    } else {
+      server.send(200, "text/html", "Invalid value. Max allowed: " + String(600 / stockCount) + "s <a href='/'>Back</a>");
+    }
+  } else {
+    server.send(200, "text/html", "Missing parameter <a href='/'>Back</a>");
+  }
+}
 
 void handleAdd() {
   String value = server.arg("value");
@@ -907,7 +930,7 @@ void blinkMarketLEDsNonBlocking() {
         if (marketIsOpen()) {
             // Alternate green/red
             digitalWrite(ledGreenPin, state);
-            digitalWrite(ledRedPin, !state);
+            digitalWrite(ledRedPin, LOW);
         } else {
             // Only red blinks
             digitalWrite(ledGreenPin, LOW);
@@ -1231,6 +1254,7 @@ void setup() {
   server.on("/remove", handleRemove);
   server.on("/clear", handleClear);
   server.on("/setkey", handleSetKey);
+  server.on("/settime", handleSetTime);
 
   //60%
   progressBar(60);
