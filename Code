@@ -41,8 +41,8 @@ enum DisplayState {
     TRANSITION_TO_STOCK
 };
 
-//my api key d1vq1a9r01qmbi8phj8gd1vq1a9r01qmbi8phj90
-String apiKey = "d1vq1a9r01qmbi8phj8gd1vq1a9r01qmbi8phj90";
+
+String apiKey = "";
 
 static DisplayState displayState = SHOW_STOCK;
 static unsigned long stateStartTime = 0;
