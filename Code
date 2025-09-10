@@ -7,11 +7,13 @@
 #include <ArduinoJson.h>
 #include <map>
 #include <Wire.h>
+#include <EEPROM.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
 #include <Fonts/FreeSans9pt7b.h>
+#include <Fonts/Org_01.h>
 
 // I2C pins for ESP8266 (D1 = SCL, D2 = SDA)
 #define SCREEN_WIDTH 128 // OLED width, in pixels
@@ -41,8 +43,10 @@ enum DisplayState {
     TRANSITION_TO_STOCK
 };
 
-
+//my api key d1vq1a9r01qmbi8phj8gd1vq1a9r01qmbi8phj90
+//get the API key on https://finnhub.io/
 String apiKey = "";
+String ServerAdr = "";
 
 static DisplayState displayState = SHOW_STOCK;
 static unsigned long stateStartTime = 0;
@@ -271,7 +275,7 @@ void handleRoot() {
 <!DOCTYPE html>
 <html>
 <head>
-  <title>My Stocks</title>
+  <title>WallStreetDisplay</title>
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -331,6 +335,18 @@ void handleRoot() {
     }
     .red-button:hover {
       background-color: #d32f2f;
+    }
+    .green-button {
+      padding: 10px 20px;
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-top: 15px;
+    }
+    .green-button:hover {
+      background-color: #3e8e41;
     }
     .settings-button {
       margin-top: 20px;
@@ -395,11 +411,33 @@ void handleRoot() {
       const panel = document.getElementById("settingsPanel");
       panel.style.display = (panel.style.display === "none" ? "block" : "none");
     }
+    function showSavedPopup() {
+      const popup = document.getElementById("savedPopup");
+      popup.style.display = "block";
+      setTimeout(() => { popup.style.display = "none"; }, 2000);
+    }
+    function showErrorPopup() {
+      const popup = document.getElementById("errorPopup");
+      popup.style.display = "block";
+      setTimeout(() => { popup.style.display = "none"; }, 2000);
+    }
+    window.addEventListener('DOMContentLoaded', () => {
+      const params = new URLSearchParams(window.location.search);
+        if (params.get("saved") === "1") {
+          showSavedPopup();
+          window.history.replaceState({}, document.title, window.location.pathname);
+        } else if (params.get("saved") === "2") {
+          showErrorPopup();
+          window.history.replaceState({}, document.title, window.location.pathname);
+        }
+    });
+
+
   </script>
 </head>
 <body>
   <div class="container">
-    <h1>My Stocks</h1>
+    <h1>WallStreetDisplay</h1>
 
     <div class="form-row">
       <form action='/add'>
@@ -428,7 +466,7 @@ void handleRoot() {
     <button class='settings-button' onclick='toggleSettings()'>Settings</button>
     <div id="settingsPanel">
       <h3>API Key</h3>
-      <form action='/setkey'>
+      <form action='/setkey?saved=1'>
         <input type='text' name='key' value=')rawliteral" + apiKey + R"rawliteral(' class='text-input'>
         <button type='submit' class='blue-button'>Save</button>
       </form>
@@ -450,11 +488,51 @@ void handleRoot() {
       <h3>Are you sure?</h3>
       <p>This will delete the entire list.</p>
       <button onclick="proceedClear()" class="red-button">Yes, erase</button>
-      <button onclick="hideCustomConfirm()">Cancel</button>
+      <button onclick="hideCustomConfirm()" class="green-button">No, go back</button>
     </div>
   </div>
 
 </body>
+
+<div id="savedPopup" class="greenPopup">Changes Saved</div>
+
+<div id="errorPopup" class="redPopup">Invalid Data</div>
+
+<style>
+  .greenPopup {
+    display: none;
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: #4CAF50;
+    color: white;
+    padding: 30px 50px;
+    border-radius: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    font-size: 20px;
+    z-index: 9999;
+    text-align: center;
+  }
+
+  .redPopup {
+    display: none;
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: #f44336;
+    color: white;
+    padding: 30px 50px;
+    border-radius: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    font-size: 20px;
+    z-index: 9999;
+    text-align: center;
+  }
+
+</style>
+
 </html>
 )rawliteral";
 
@@ -464,10 +542,34 @@ void handleRoot() {
 void handleSetKey() {
   if (server.hasArg("key")) {
     apiKey = server.arg("key");
-    // optionally save to EEPROM or SPIFFS if you want persistence
+    saveApiKey(apiKey);   // save to EEPROM
   }
-  server.sendHeader("Location", "/");
-  server.send(303); // redirect back to root
+  server.sendHeader("Location", "/?saved=1");
+  server.send(303);
+}
+
+void saveApiKey(const String &key) {
+  // Limit the stored size, e.g. 100 chars
+  int maxLen = 100;
+  int len = key.length();
+  if (len > maxLen) len = maxLen;
+
+  for (int i = 0; i < len; i++) {
+    EEPROM.write(i, key[i]);
+  }
+  EEPROM.write(len, '\0'); // null terminator
+  EEPROM.commit();
+}
+
+void loadApiKey() {
+  char buf[101];
+  for (int i = 0; i < 100; i++) {
+    buf[i] = EEPROM.read(i);
+    if (buf[i] == '\0') break;
+  }
+  buf[100] = '\0';
+  apiKey = String(buf);
+  Serial.println("Loaded API key: " + apiKey);
 }
 
 void handleSetTime() {
@@ -480,12 +582,17 @@ void handleSetTime() {
     // Constraint: newTime >= 0 and newTime * stockCount <= 60000
     if ((newTime * 1000) >= 0 && (newTime * stockCount * 1000) <= 600000) {
       displayInterval = newTime*1000;
-      server.send(200, "text/html", "Display time updated! <a href='/'>Back</a>");
+        server.sendHeader("Location", "/?saved=1");  // redirect
+        server.send(303);
     } else {
-      server.send(200, "text/html", "Invalid value. Max allowed: " + String(600 / stockCount) + "s <a href='/'>Back</a>");
+      //server.send(200, "text/html", "Invalid value. Max allowed: " + String(600 / stockCount) + "s <a href='/'>Back</a>");
+      server.sendHeader("Location", "/?saved=2");  // redirect
+      server.send(303);
     }
   } else {
-    server.send(200, "text/html", "Missing parameter <a href='/'>Back</a>");
+    //server.send(200, "text/html", "Missing parameter <a href='/'>Back</a>");
+    server.sendHeader("Location", "/?saved=2");  // redirect
+    server.send(303);
   }
 }
 
@@ -923,7 +1030,7 @@ void blinkMarketLEDsNonBlocking() {
     static unsigned long lastBlink = 0;
     static bool state = false;
 
-    if (millis() - lastBlink > 200) { // blink interval
+    if (millis() - lastBlink > 2500) { // blink interval
         lastBlink = millis();
         state = !state;
 
@@ -1092,6 +1199,13 @@ void showServerMode() {
   display.setCursor((SCREEN_WIDTH - w) / 2, 48);
   display.print(text);
 
+  display.setFont(&Org_01);  
+  display.setTextSize(1);          // smallest size
+  display.setTextColor(SSD1306_WHITE);
+  display.getTextBounds(ServerAdr, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2, 58);
+  display.print(ServerAdr);
+
   display.display();
 }
 
@@ -1166,27 +1280,64 @@ void progressBar(int percentage)
 
   digitalWrite(ledGreenPin, HIGH);    
   delay(2000);
-  digitalWrite(ledRedPin, LOW);
+  digitalWrite(ledGreenPin, LOW);
 }
 
 void showFirstStart()
 {
   display.clearDisplay();
-
   display.setFont(&FreeSans9pt7b);
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
-  // Messaggio "NO DATA"
-  display.setCursor(25, 25);
-  display.print("NO DATA");
+  int16_t x1, y1;
+  uint16_t w, h;
 
-  // Messaggio "SWITCHING MODE"
-  display.setCursor(5, 55);
-  display.print("SWITCHING");
+  String text1 = "NO DATA";
+  display.getTextBounds(text1, 0, 0, &x1, &y1, &w, &h);
+  int16_t xCentered1 = (display.width() - w) / 2;
+  int16_t yPos1 = 25;  // vertical position
+  display.setCursor(xCentered1, yPos1);
+  display.print(text1);
+
+  String text2 = "SWITCHING";
+  display.getTextBounds(text2, 0, 0, &x1, &y1, &w, &h);
+  int16_t xCentered2 = (display.width() - w) / 2;
+  int16_t yPos2 = 55;  // vertical position
+  display.setCursor(xCentered2, yPos2);
+  display.print(text2);
 
   display.display();
 }
+
+void showInsertAPI()
+{
+  display.clearDisplay();
+  display.setFont(&FreeSans9pt7b);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  int16_t x1, y1;
+  uint16_t w, h;
+
+  String text1 = "INSERT";
+  display.getTextBounds(text1, 0, 0, &x1, &y1, &w, &h);
+  int16_t xCentered1 = (display.width() - w) / 2;
+  int16_t yPos1 = 25;  // vertical position
+  display.setCursor(xCentered1, yPos1);
+  display.print(text1);
+
+  String text2 = "API KEY";
+  display.getTextBounds(text2, 0, 0, &x1, &y1, &w, &h);
+  int16_t xCentered2 = (display.width() - w) / 2;
+  int16_t yPos2 = 55;  // vertical position
+  display.setCursor(xCentered2, yPos2);
+  display.print(text2);
+
+  display.display();
+}
+
+
 
 // === Setup ===
 void setup() {
@@ -1240,7 +1391,8 @@ void setup() {
     // STA mode: connected to WiFi, clear WiFi icon
     display.clearDisplay();
     Serial.print("Connesso. IP: ");
-    Serial.println(WiFi.localIP());
+    ServerAdr = WiFi.localIP().toString();
+    Serial.println(ServerAdr);    
   }
 
   //50%
@@ -1276,6 +1428,9 @@ void setup() {
     Serial.printf("Local time: %02d:%02d:%02d\n", 
                   timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
   }
+
+  EEPROM.begin(512); // allocate 512 bytes
+  loadApiKey();
 
   //100%
   progressBar(100);
@@ -1332,6 +1487,11 @@ void loop() {
       showFirstStart();
       delay(4000);
       serverMode = true;
+      return;
+    }
+
+    if (apiKey == "") {
+      showInsertAPI();
       return;
     }
 
