@@ -9,3 +9,6 @@ COMPONENT LIST:
 1 I2C display
 1 usb-c alimentation module (4,5V to 9V output)
 1 custom PCB
+
+IMPORTANT:
+-> the file "list.txt" must be uploaded to the board using the littleFS library
