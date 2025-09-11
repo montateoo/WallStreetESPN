@@ -27,7 +27,7 @@
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 uint8_t virtualBuffer[2048]; // 256 x 64 bits
 
-// === Struttura della linked list ===
+// === linked list Structure ===
 struct Node {
   String data;
   Node* next;
@@ -40,7 +40,6 @@ struct StockData {
 
 struct tm timeinfo;
 
-// Possible display states
 enum DisplayState {
     SHOW_STOCK,
     TRANSITION_TO_COUNTDOWN,
@@ -62,35 +61,31 @@ std::map<String, StockData> stockCache;
 
 Node* head = nullptr;
 
-// === Stato per fetch non bloccante ===
 Node* currentNode = nullptr;
 unsigned long lastQuoteRequestTime = 0;
 const unsigned long quoteDelay = 1500;
 bool isFetching = false;
 
-// === Altre variabili globali ===
-const int wifiResetButtonPin = 12;  // D6
+const int wifiResetButtonPin = 12;
 const int buttonPin = 14;
-const int ledGreenPin = 13;  // GPIO13
-const int ledRedPin = 15;    // GPIO15
+const int ledGreenPin = 13;
+const int ledRedPin = 15;
 bool serverMode = false;
 int stockNum = 0;
 
 Node* displayNode = nullptr;
 unsigned long lastDisplaySwitch = 0;
-unsigned long displayInterval = 0; // 5 sec
+unsigned long displayInterval = 0; //DEFAULT ITS 5 SECONDS
 bool newStock = false;
 
-// Example market hours (NY Stock Exchange)
+//market hours (NY Stock Exchange)
 const int MARKET_OPEN_HOUR = 15;
 const int MARKET_OPEN_MINUTE = 30;
 const int MARKET_CLOSE_HOUR = 22;
 const int MARKET_CLOSE_MINUTE = 0;
 
-// Previous countdown text (for sliding animation)
 String prevStatus = "";
 String prevCountdown = "";
-
 
 // NTP servers
 const char* ntpServer = "pool.ntp.org";
@@ -98,7 +93,7 @@ const long  gmtOffset_sec = 3600;   // CET is UTC+1
 const int   daylightOffset_sec = 3600; // +1 hour for CEST (DST)
 
 
-// Example 24x24 server icon bitmap
+//24x24 server icon bitmap
 const unsigned char PROGMEM serverIcon[] = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0xff, 0xf8, 0x3f, 0xff, 0xfc, 0x30, 0x00, 0x0c, 0x37, 
 	0xc3, 0x6c, 0x37, 0xc3, 0x6c, 0x30, 0x00, 0x0c, 0x3f, 0xff, 0xfc, 0x3f, 0xff, 0xfc, 0x30, 0x00, 
@@ -107,7 +102,7 @@ const unsigned char PROGMEM serverIcon[] = {
 	0xff, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
-// New 24x24 stock market arrow up icon bitmap
+//24x24 stock market icon bitmap
 const unsigned char PROGMEM dollarIcon[] = {
 0x00, 0x00, 0x00, 0x00, 0x7e, 0x00, 0x03, 0xff, 0xc0, 0x07, 0xff, 0xe0, 0x0f, 0xff, 0xf0, 0x1f, 
 	0xe7, 0xf8, 0x1f, 0xc3, 0xf8, 0x3f, 0x81, 0xfc, 0x3f, 0x1c, 0xfc, 0x7f, 0x1f, 0xfe, 0x7f, 0x8f, 
@@ -116,6 +111,7 @@ const unsigned char PROGMEM dollarIcon[] = {
 	0xff, 0x80, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00
 };
 
+// 32x32 wifi icon bitmap
 const unsigned char PROGMEM wifiDraw[] = {
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
@@ -156,8 +152,6 @@ ESP8266WebServer server(80);
 void drawStockFrame(String symbol, StockData data, int xOffset);
 void updateLEDs(StockData data);
 
-
-// === Funzioni Lista Collegata ===
 void addNode(String value) {
   if (value == "") return;
   Node* newNode = new Node{value, nullptr};
@@ -199,7 +193,6 @@ void clearList() {
   saveListToFS();
   stockNum=0;
 
-  // 🔁 Ferma qualsiasi fetch in corso
   currentNode = nullptr;
   isFetching = false;
 }
@@ -215,7 +208,6 @@ String listToStringHTML() {
   return output;
 }
 
-// === Funzioni LittleFS ===
 void saveListToFS() {
   File file = LittleFS.open("/list.txt", "w");
   if (!file) {
@@ -276,7 +268,7 @@ void loadListFromFS() {
   file.close();
 
   if (tempHead) {
-    freeListOnly();     // ✅ don’t save to FS here
+    freeListOnly();
     head = tempHead;
     stockNum = count;
     Serial.println("✅ Lista caricata da LittleFS");
@@ -285,8 +277,7 @@ void loadListFromFS() {
   }
 }
 
-
-// === Web Server ===
+// WEB SERVER
 void handleRoot() {
   String html = R"rawliteral(
 <!DOCTYPE html>
@@ -449,7 +440,6 @@ void handleRoot() {
         }
     });
 
-
   </script>
 </head>
 <body>
@@ -477,7 +467,6 @@ void handleRoot() {
 
   html += listToStringHTML();
 
-  // settings button + hidden API key panel
   extern String apiKey;
   html += R"rawliteral(
     <button class='settings-button' onclick='toggleSettings()'>Settings</button>
@@ -559,14 +548,13 @@ void handleRoot() {
 void handleSetKey() {
   if (server.hasArg("key")) {
     apiKey = server.arg("key");
-    saveApiKey(apiKey);   // save to EEPROM
+    saveApiKey(apiKey);
   }
   server.sendHeader("Location", "/?saved=1");
   server.send(303);
 }
 
 void saveApiKey(const String &key) {
-  // Limit the stored size, e.g. 100 chars
   int maxLen = 100;
   int len = key.length();
   if (len > maxLen) len = maxLen;
@@ -574,7 +562,7 @@ void saveApiKey(const String &key) {
   for (int i = 0; i < len; i++) {
     EEPROM.write(i, key[i]);
   }
-  EEPROM.write(len, '\0'); // null terminator
+  EEPROM.write(len, '\0');
   EEPROM.commit();
 }
 
@@ -615,20 +603,16 @@ void handleSetTime() {
   }
 }
 
-// === SAVE displayInterval to EEPROM ===
 void saveDisplayInterval(unsigned long interval) {
-  // Write 4 bytes starting at EEPROM_DISPLAY_ADDR
   EEPROM.put(EEPROM_DISPLAY_ADDR, interval);
   EEPROM.commit();
   Serial.println("✅ Saved displayInterval to EEPROM: " + String(interval));
 }
 
-// === LOAD displayInterval from EEPROM ===
 void loadDisplayInterval() {
   unsigned long stored;
   EEPROM.get(EEPROM_DISPLAY_ADDR, stored);
 
-  // Validate range (1s–10min)
   if (stored >= 1000 && stored <= 600000) {
     displayInterval = stored;
     Serial.println("✅ Loaded displayInterval from EEPROM: " + String(displayInterval));
@@ -761,32 +745,29 @@ void fetchSingleStock(String symbol) {
 }
 
 StockData fetchSingleStockWithRetry(String symbol) {
-    StockData data = stockCache[symbol]; // start with cached data
+    StockData data = stockCache[symbol];
 
-    for (int retry = 0; retry < 2; retry++) { // exactly 2 attempts max
-        if (data.currentPrice != 0) break;    // success, stop retrying
-        fetchSingleStock(symbol);             // updates stockCache (no drawing)
-        data = stockCache[symbol];            // refresh data
-        delay(150);                           // small wait between tries
+    for (int retry = 0; retry < 2; retry++) {
+        if (data.currentPrice != 0) break;
+        fetchSingleStock(symbol);
+        data = stockCache[symbol];
+        delay(150);
     }
 
-    return data; // even if still zero, return so display can skip to next
+    return data;
 }
 
-// === Gestione pulsante migliorata ===
 void checkButton() {
   static bool buttonPreviouslyPressed = false;
 
-  bool currentReading = digitalRead(buttonPin); // HIGH quando premuto con pull-down
+  bool currentReading = digitalRead(buttonPin);
 
   if (currentReading && !buttonPreviouslyPressed) {
-    // Bottone è appena stato premuto
     serverMode = !serverMode;
-    isFetching = false;  // Ferma eventuale fetch in corso
+    isFetching = false;
     Serial.print("🔁 Modalità cambiata: ");
     Serial.println(serverMode ? "SERVER" : "DISPLAY");
 
-     // Spegni entrambi i LED al cambio modalità
     digitalWrite(ledGreenPin, LOW);
     digitalWrite(ledRedPin, LOW);
   }
@@ -1079,11 +1060,9 @@ void blinkMarketLEDsNonBlocking() {
         state = !state;
 
         if (marketIsOpen()) {
-            // Alternate green/red
             digitalWrite(ledGreenPin, state);
             digitalWrite(ledRedPin, LOW);
         } else {
-            // Only red blinks
             digitalWrite(ledGreenPin, LOW);
             digitalWrite(ledRedPin, state);
         }
@@ -1171,7 +1150,6 @@ void updateDisplay() {
     }
 }
 
-// Call this ONCE per stock change, not inside the animation loop
 void updateLEDs(StockData data) {
     if (data.percent > 0) {
         digitalWrite(ledGreenPin, HIGH);
@@ -1225,26 +1203,22 @@ void drawStockFrame(String symbol, StockData data, int xOffset) {
 void showServerMode() {
   display.clearDisplay();
   
-  // Disegna icona server centrata in alto
   display.drawBitmap((SCREEN_WIDTH - 24) / 2, 4, serverIcon, 24, 24, SSD1306_WHITE);
 
-  // Imposta font più piccolo di prima
   display.setFont(&FreeSansBold9pt7b);
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
-  // Calcola per centrare il testo
   int16_t x1, y1;
   uint16_t w, h;
   String text = "SERVER";
   display.getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
 
-  // Posiziona testo sotto l’icona
   display.setCursor((SCREEN_WIDTH - w) / 2, 48);
   display.print(text);
 
   display.setFont(&Org_01);  
-  display.setTextSize(1);          // smallest size
+  display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.getTextBounds(ServerAdr, 0, 0, &x1, &y1, &w, &h);
   display.setCursor((SCREEN_WIDTH - w) / 2, 58);
@@ -1256,10 +1230,8 @@ void showServerMode() {
 void showWallStreet() {
   display.clearDisplay();
   
-  // Draw $ icon centered at top
   display.drawBitmap((SCREEN_WIDTH - 24) / 2, 0, dollarIcon, 24, 24, SSD1306_WHITE);
 
-  // Bold font
   display.setFont(&FreeSansBold9pt7b);
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -1267,12 +1239,10 @@ void showWallStreet() {
   int16_t x1, y1;
   uint16_t w, h;
 
-  // "WALL"
   display.getTextBounds("WALL", 0, 0, &x1, &y1, &w, &h);
   display.setCursor((SCREEN_WIDTH - w) / 2, 40);
   display.print("WALL");
 
-  // "STREET"
   display.getTextBounds("STREET", 0, 0, &x1, &y1, &w, &h);
   display.setCursor((SCREEN_WIDTH - w) / 2, 56);
   display.print("STREET");
@@ -1284,7 +1254,7 @@ void blinkLedsInServerMode() {
   static unsigned long lastBlinkTime = 0;
   static bool ledState = false;
 
-  const unsigned long blinkInterval = 800;  // ms
+  const unsigned long blinkInterval = 800;
 
   if (millis() - lastBlinkTime >= blinkInterval) {
     ledState = !ledState;
@@ -1298,25 +1268,21 @@ void progressBar(int percentage)
 {
   display.clearDisplay();
 
-  // Cornice della progress bar
   display.drawRect(7, 24, 114, 17, WHITE);
   display.drawRect(6, 23, 116, 19, WHITE);
 
-  // Barra proporzionale alla percentuale
-  int barWidth = (percentage * 110) / 100;  // max 110 px
+  int barWidth = (percentage * 110) / 100;
   display.fillRect(9, 26, barWidth, 13, WHITE);
 
-  // Titolo "STARTING"
   display.setFont(&FreeSans9pt7b);
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(20, 15);   // centrato sopra la barra
+  display.setCursor(20, 15);
   display.print("STARTING");
 
-  // Percentuale grande sotto
   display.setFont(&FreeSansBold12pt7b);
   display.setTextColor(WHITE);
-  display.setCursor(40, 60);   // centrato sotto la barra
+  display.setCursor(40, 60);
   display.print(percentage);
   display.print("%");
 
@@ -1340,14 +1306,14 @@ void showFirstStart()
   String text1 = "NO DATA";
   display.getTextBounds(text1, 0, 0, &x1, &y1, &w, &h);
   int16_t xCentered1 = (display.width() - w) / 2;
-  int16_t yPos1 = 25;  // vertical position
+  int16_t yPos1 = 25;
   display.setCursor(xCentered1, yPos1);
   display.print(text1);
 
   String text2 = "SWITCHING";
   display.getTextBounds(text2, 0, 0, &x1, &y1, &w, &h);
   int16_t xCentered2 = (display.width() - w) / 2;
-  int16_t yPos2 = 55;  // vertical position
+  int16_t yPos2 = 55;
   display.setCursor(xCentered2, yPos2);
   display.print(text2);
 
@@ -1367,23 +1333,20 @@ void showInsertAPI()
   String text1 = "INSERT";
   display.getTextBounds(text1, 0, 0, &x1, &y1, &w, &h);
   int16_t xCentered1 = (display.width() - w) / 2;
-  int16_t yPos1 = 25;  // vertical position
+  int16_t yPos1 = 25;
   display.setCursor(xCentered1, yPos1);
   display.print(text1);
 
   String text2 = "API KEY";
   display.getTextBounds(text2, 0, 0, &x1, &y1, &w, &h);
   int16_t xCentered2 = (display.width() - w) / 2;
-  int16_t yPos2 = 55;  // vertical position
+  int16_t yPos2 = 55;
   display.setCursor(xCentered2, yPos2);
   display.print(text2);
 
   display.display();
 }
 
-
-
-// === Setup ===
 void setup() {
   Serial.begin(115200);
 
@@ -1427,12 +1390,9 @@ void setup() {
 
   //40%
   progressBar(40);
-  // --- At this point autoConnect returned successfully ---
   if (WiFi.getMode() == WIFI_AP) {
-    // AP mode active: keep WiFi icon
     Serial.println("📶 AP mode active: bitmap stays on OLED");
   } else {
-    // STA mode: connected to WiFi, clear WiFi icon
     display.clearDisplay();
     Serial.print("Connesso. IP: ");
     ServerAdr = WiFi.localIP().toString();
@@ -1441,7 +1401,6 @@ void setup() {
 
   //50%
   progressBar(50);
-  // --- Load stocks from FS ---
   loadListFromFS();
 
   // --- Web server ---
@@ -1480,7 +1439,7 @@ void setup() {
   //100%
   progressBar(100);
   Serial.println("🟢 Avviato in modalità DISPLAY");
-  newStock = true; //when turned on downloads new data
+  newStock = true;
 }
 
 // === Loop ===
@@ -1491,31 +1450,29 @@ void loop() {
   static bool wifiResetPressed = false;
   static unsigned long wifiResetStart = 0;
 
-  if (digitalRead(wifiResetButtonPin) == HIGH) {  // button pressed
+  if (digitalRead(wifiResetButtonPin) == HIGH) {
     if (!wifiResetPressed) {
       wifiResetPressed = true;
       wifiResetStart = millis();
-    } else if (millis() - wifiResetStart > 5000) {  // held > 5 sec
+    } else if (millis() - wifiResetStart > 5000) {
       Serial.println("🔧 WiFi reset requested via button");
       digitalWrite(ledGreenPin, LOW);
       digitalWrite(ledRedPin, LOW);
       delay(500);
       WiFiManager wifiManager;
-      wifiManager.resetSettings(); // clear saved credentials
+      wifiManager.resetSettings();
       delay(500);
       ESP.restart();
     }
   } else {
-    wifiResetPressed = false;  // reset if released early
+    wifiResetPressed = false;
   }
 
-  // If in AP mode → nothing else to do (just serve portal & show bitmap)
   if (WiFi.getMode() == WIFI_AP) {
     server.handleClient();
     return;
   }
 
-  // If in STA mode → normal stock display logic
   checkButton();
 
   if (serverMode) {
@@ -1552,7 +1509,7 @@ void loop() {
       handleNonBlockingFetch();
       if (newStock) newStock = false;
     } else {
-      updateDisplay();  // show current stock every 1 min
+      updateDisplay();
     }
   }
 }
