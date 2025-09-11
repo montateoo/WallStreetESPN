@@ -15,6 +15,11 @@
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/Org_01.h>
 
+// Reserve memory: 0..100 for API key, 101..104 for displayInterval
+#define EEPROM_SIZE 200
+#define EEPROM_APIKEY_ADDR 0
+#define EEPROM_DISPLAY_ADDR 101
+
 // I2C pins for ESP8266 (D1 = SCL, D2 = SDA)
 #define SCREEN_WIDTH 128 // OLED width, in pixels
 #define SCREEN_HEIGHT 64 // OLED height, in pixels
@@ -43,7 +48,6 @@ enum DisplayState {
     TRANSITION_TO_STOCK
 };
 
-//my api key d1vq1a9r01qmbi8phj8gd1vq1a9r01qmbi8phj90
 //get the API key on https://finnhub.io/
 String apiKey = "";
 String ServerAdr = "";
@@ -74,7 +78,7 @@ int stockNum = 0;
 
 Node* displayNode = nullptr;
 unsigned long lastDisplaySwitch = 0;
-unsigned long displayInterval = 5000; // 5 sec
+unsigned long displayInterval = 0; // 5 sec
 bool newStock = false;
 
 // Example market hours (NY Stock Exchange)
@@ -226,6 +230,18 @@ void saveListToFS() {
   file.close();
 }
 
+void freeListOnly() {
+  while (head) {
+    Node* temp = head;
+    head = head->next;
+    delete temp;
+  }
+  stockNum = 0;
+  currentNode = nullptr;
+  isFetching = false;
+}
+
+
 void loadListFromFS() {
   if (!LittleFS.exists("/list.txt")) {
     Serial.println("⚠️ list.txt non trovato");
@@ -239,8 +255,8 @@ void loadListFromFS() {
   }
 
   Node* tempHead = nullptr;
-  Node* tail = nullptr;  // Ottimizzazione
-  int count = 0;         // Conta i nodi caricati
+  Node* tail = nullptr;
+  int count = 0;
 
   while (file.available()) {
     String line = file.readStringUntil('\n');
@@ -260,14 +276,15 @@ void loadListFromFS() {
   file.close();
 
   if (tempHead) {
-    clearList();
+    freeListOnly();     // ✅ don’t save to FS here
     head = tempHead;
-    stockNum = count;  // ✅ aggiorna correttamente
+    stockNum = count;
     Serial.println("✅ Lista caricata da LittleFS");
   } else {
     Serial.println("⚠️ File vuoto o nessun dato valido");
   }
 }
+
 
 // === Web Server ===
 void handleRoot() {
@@ -582,6 +599,8 @@ void handleSetTime() {
     // Constraint: newTime >= 0 and newTime * stockCount <= 60000
     if ((newTime * 1000) >= 0 && (newTime * stockCount * 1000) <= 600000) {
       displayInterval = newTime*1000;
+      saveDisplayInterval(displayInterval);
+
         server.sendHeader("Location", "/?saved=1");  // redirect
         server.send(303);
     } else {
@@ -593,6 +612,31 @@ void handleSetTime() {
     //server.send(200, "text/html", "Missing parameter <a href='/'>Back</a>");
     server.sendHeader("Location", "/?saved=2");  // redirect
     server.send(303);
+  }
+}
+
+// === SAVE displayInterval to EEPROM ===
+void saveDisplayInterval(unsigned long interval) {
+  // Write 4 bytes starting at EEPROM_DISPLAY_ADDR
+  EEPROM.put(EEPROM_DISPLAY_ADDR, interval);
+  EEPROM.commit();
+  Serial.println("✅ Saved displayInterval to EEPROM: " + String(interval));
+}
+
+// === LOAD displayInterval from EEPROM ===
+void loadDisplayInterval() {
+  unsigned long stored;
+  EEPROM.get(EEPROM_DISPLAY_ADDR, stored);
+
+  // Validate range (1s–10min)
+  if (stored >= 1000 && stored <= 600000) {
+    displayInterval = stored;
+    Serial.println("✅ Loaded displayInterval from EEPROM: " + String(displayInterval));
+  } else {
+    Serial.println("⚠️ No valid displayInterval in EEPROM, using default 5000ms");
+    EEPROM.put(EEPROM_DISPLAY_ADDR, 5000);
+    EEPROM.commit();
+    displayInterval = 5000;
   }
 }
 
@@ -1429,8 +1473,9 @@ void setup() {
                   timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
   }
 
-  EEPROM.begin(512); // allocate 512 bytes
+  EEPROM.begin(EEPROM_SIZE);
   loadApiKey();
+  loadDisplayInterval();
 
   //100%
   progressBar(100);
