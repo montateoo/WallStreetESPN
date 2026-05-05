@@ -585,7 +585,7 @@ void handleSetTime() {
     if (stockCount == 0) stockCount = 1; // avoid divide-by-zero
 
     // Constraint: newTime >= 0 and newTime * stockCount <= 60000
-    if ((newTime * 1000) >= 0 && (newTime * stockCount * 1000) <= 600000) {
+    if (newTime >= 1 && (newTime * stockCount * 1000) <= 600000) {
       displayInterval = newTime*1000;
       saveDisplayInterval(displayInterval);
 
@@ -784,12 +784,6 @@ bool marketIsOpen() {
 }
 
 String getMarketCountdown() {
-    // Market hours in Italy (example: winter time)
-    const int MARKET_OPEN_HOUR = 15;
-    const int MARKET_OPEN_MINUTE = 30;
-    const int MARKET_CLOSE_HOUR = 22;
-    const int MARKET_CLOSE_MINUTE = 0;
-
     int currentMinutes = timeinfo.tm_hour * 60 + timeinfo.tm_min;
     int openMinutes    = MARKET_OPEN_HOUR * 60 + MARKET_OPEN_MINUTE;
     int closeMinutes   = MARKET_CLOSE_HOUR * 60 + MARKET_CLOSE_MINUTE;
@@ -994,46 +988,6 @@ void drawCountdownFrameVirtual(const String& statusText, const String& countdown
   }
 }
 
-void drawCountdownToVirtual(const String& statusText, const String& countdown, int xOffset) {
-  display.clearDisplay();
-
-  display.setFont(&FreeSansBold9pt7b);
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-
-  int16_t x1, y1;
-  uint16_t w, h;
-
-  // Prima riga: OPENS / CLOSES
-  display.getTextBounds(statusText, 0, 0, &x1, &y1, &w, &h);
-  display.setCursor((SCREEN_WIDTH - w) / 2, 20);
-  display.print(statusText);
-
-  // Seconda riga: countdown
-  display.getTextBounds(countdown, 0, 0, &x1, &y1, &w, &h);
-  display.setCursor((SCREEN_WIDTH - w) / 2, 45);
-  display.print(countdown);
-
-  // Copia nel virtual buffer
-  uint8_t* src = display.getBuffer();
-  for (int y = 0; y < 64; y++) {
-    for (int x = 0; x < 128; x++) {
-      int dstX = x + xOffset;
-      if (dstX >= 256) continue;
-
-      int srcIndex = x + (y / 8) * 128;
-      bool pixel = (src[srcIndex] >> (y & 7)) & 0x1;
-
-      if (pixel) {
-        int dstIndex = y * 256 + dstX;
-        int dstByte = dstIndex / 8;
-        int dstBit = 7 - (dstIndex % 8);
-        virtualBuffer[dstByte] |= (1 << dstBit);
-      }
-    }
-  }
-}
-
 // ----------------- Helpers -----------------
 String sanitizeSymbol(const String& raw) {
     String sym = raw;
@@ -1071,6 +1025,8 @@ void blinkMarketLEDsNonBlocking() {
 
 // ----------------- Main Display Function -----------------
 void updateDisplay() {
+    getLocalTime(&timeinfo);
+
     if (!displayNode) displayNode = head;
     if (!displayNode) return;
 
@@ -1124,6 +1080,8 @@ void updateDisplay() {
         }
 
         case SHOW_COUNTDOWN: {
+            drawCountdownFrame(statusText, countdown);
+            display.display();
             blinkMarketLEDsNonBlocking();
 
             if (millis() - stateStartTime > displayInterval) {
