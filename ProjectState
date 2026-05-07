@@ -1,4 +1,92 @@
-TODO:
+PROJECT STATE — WallStreetESPN
+Last updated: 2026-05-07
 
-pop up for setting display time functions when error occurs
-the bug of the maximum retries its still persistent
+================================================================
+COMPLETED
+================================================================
+
+[CORE]
+- ESP8266 firmware compiles and flashes correctly
+- WiFiManager integration (AP fallback, 5s hold to reset)
+- NTP time sync (CET/CEST, pool.ntp.org)
+- LittleFS mount and portfolio persistence (/list.txt)
+- EEPROM storage: API key, display interval, LED brightness, trading toggle
+
+[DISPLAY]
+- SSD1306 128x64 OLED via I2C (D1/D2)
+- Virtual 256x64 framebuffer for smooth horizontal slide animations
+- Stock frame: symbol, price ($), daily change (%)
+- Market countdown frame: OPENS / CLOSES + time remaining
+- Trading status frame: portfolio value, last trade, total P&L%
+- Boot progress bar (30% / 40% / 50% / 60% / 70% / 90% / 100%)
+- State machine: SHOW_STOCK → COUNTDOWN → TRADING → SHOW_STOCK
+
+[BUG FIXES]
+- timeinfo never refreshed after setup → getLocalTime() now called in updateDisplay()
+- SHOW_COUNTDOWN state did not redraw → drawCountdownFrame() + display.display() added
+- handleSetTime accepted 0 → now requires newTime >= 1 second
+- Removed dead duplicate drawCountdownToVirtual() function
+- Removed local variable shadowing in getMarketCountdown()
+
+[WEB UI]
+- Portfolio management: add, remove, clear stocks
+- Settings panel: API key, display interval, LED brightness sliders, trading toggle
+- Pop-up feedback for save success / validation error
+- Confirm modal before clearing the full portfolio
+- Trading dashboard (/trading): positions, recent trades, portfolio value, P&L
+
+[TRADING ALGORITHM]
+- SMA(3) / SMA(7) crossover on portfolio stocks
+- Buys on golden cross (up to 35% of portfolio per stock)
+- Sells on death cross (full position)
+- Only active during NYSE market hours
+- State persists across reboots (/trading.json)
+- Enabled/disabled via web UI without reflashing
+
+[LEDs]
+- Green LED: price up / market open blink
+- Red LED: price down / market closed blink
+- PWM brightness control (0–100%) per LED, saved to EEPROM
+- All digitalWrite calls replaced with analogWrite PWM helpers
+
+================================================================
+OPEN BUGS
+================================================================
+
+[ ] Serial output shows HTTP errors (status 0 or -1) on some fetches
+    — likely SSL handshake timeout on ESP8266
+    — workaround: fetchSingleStockWithRetry does 2 attempts
+
+[ ] Display shows $0.00 on first boot if API fetch fails silently
+    — need to show a "FETCHING..." or error indicator instead of 0.00
+
+================================================================
+TODO
+================================================================
+
+[ ] Show "FETCHING..." or spinner on OLED during the fetch cycle
+    instead of the static WallStreet logo
+
+[ ] Add timeout/error indicator when Finnhub returns 0 or HTTP error
+    (currently fails silently, shows stale or zero price)
+
+[ ] Pop-up notification in web UI when display time setting is invalid
+    (currently redirects with ?saved=2 but the error popup CSS
+     class is defined outside <body> — may not render on all browsers)
+
+[ ] Consider replacing DynamicJsonDocument with StaticJsonDocument
+    to reduce heap fragmentation on long uptimes
+
+[ ] Weekend/holiday handling for market countdown
+    (currently counts down to next 15:30 regardless of day of week)
+
+[ ] OTA (Over-The-Air) firmware update support
+    — would eliminate need for USB data connection to reflash
+
+================================================================
+HARDWARE NOTES
+================================================================
+
+- ESP8266 is 2.4 GHz ONLY — will not connect to 5 GHz WiFi networks
+- CH340 driver required on Windows for USB-to-serial communication
+- Serial monitor baud rate: 115200

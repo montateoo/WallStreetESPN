@@ -19,6 +19,9 @@
 #define EEPROM_SIZE 200
 #define EEPROM_APIKEY_ADDR 0
 #define EEPROM_DISPLAY_ADDR 101
+#define EEPROM_LED_GREEN_ADDR 105
+#define EEPROM_LED_RED_ADDR   106
+#define EEPROM_TRADING_EN_ADDR 107
 
 // I2C pins for ESP8266 (D1 = SCL, D2 = SDA)
 #define SCREEN_WIDTH 128 // OLED width, in pixels
@@ -44,6 +47,8 @@ enum DisplayState {
     SHOW_STOCK,
     TRANSITION_TO_COUNTDOWN,
     SHOW_COUNTDOWN,
+    TRANSITION_TO_TRADING,
+    SHOW_TRADING,
     TRANSITION_TO_STOCK
 };
 
@@ -77,6 +82,41 @@ Node* displayNode = nullptr;
 unsigned long lastDisplaySwitch = 0;
 unsigned long displayInterval = 0; //DEFAULT ITS 5 SECONDS
 bool newStock = false;
+
+// === Trading System ===
+#define PRICE_HISTORY_LEN 10
+#define SMA_SHORT_PERIOD  3
+#define SMA_LONG_PERIOD   7
+#define STARTING_CASH     100.0f
+#define MAX_POSITION_PCT  0.35f
+
+struct TradingPosition {
+    float shares       = 0;
+    float avgBuyPrice  = 0;
+    float priceHistory[PRICE_HISTORY_LEN] = {};
+    int   historyCount = 0;
+    int   historyHead  = 0;
+    bool  prevBullish  = false;
+    bool  prevSet      = false;
+};
+
+struct TradeRecord {
+    String symbol;
+    String action;
+    float  price;
+    float  shares;
+    float  pnl;
+};
+
+float tradingCash      = STARTING_CASH;
+float totalRealizedPnL = 0;
+int   ledGreenIntensity = 100;
+int   ledRedIntensity   = 100;
+bool  tradingEnabled    = true;
+std::map<String, TradingPosition> tradingPositions;
+TradeRecord tradeLog[5];
+int tradeLogHead  = 0;
+int tradeLogCount = 0;
 
 //market hours (NY Stock Exchange)
 const int MARKET_OPEN_HOUR = 15;
@@ -151,6 +191,13 @@ ESP8266WebServer server(80);
 
 void drawStockFrame(String symbol, StockData data, int xOffset);
 void updateLEDs(StockData data);
+
+void setLedGreen(bool on) {
+    analogWrite(ledGreenPin, on ? map(ledGreenIntensity, 0, 100, 0, 1023) : 0);
+}
+void setLedRed(bool on) {
+    analogWrite(ledRedPin, on ? map(ledRedIntensity, 0, 100, 0, 1023) : 0);
+}
 
 void addNode(String value) {
   if (value == "") return;
@@ -470,6 +517,7 @@ void handleRoot() {
   extern String apiKey;
   html += R"rawliteral(
     <button class='settings-button' onclick='toggleSettings()'>Settings</button>
+    <br><a href='/trading'><button class='green-button' style='margin-top:10px'>Trading Dashboard</button></a>
     <div id="settingsPanel">
       <h3>API Key</h3>
       <form action='/setkey?saved=1'>
@@ -482,6 +530,32 @@ void handleRoot() {
         <input type='number' name='time' min='0' value=')rawliteral" + String(displayInterval/1000) + R"rawliteral(' class='text-input'>
         <button type='submit' class='blue-button'>Save</button>
       </form>
+
+      <h3>LED Brightness</h3>
+      <label>Green: <span id='gv'>)rawliteral" + String(ledGreenIntensity) + R"rawliteral(</span>%</label>
+      <form action='/setledgreen' style='margin-top:4px'>
+        <input type='range' name='val' min='0' max='100' value=')rawliteral" + String(ledGreenIntensity) + R"rawliteral('
+          oninput="document.getElementById('gv').textContent=this.value"
+          style='flex:1;border:none;padding:6px'>
+        <button type='submit' class='blue-button'>Save</button>
+      </form>
+      <label>Red: <span id='rv'>)rawliteral" + String(ledRedIntensity) + R"rawliteral(</span>%</label>
+      <form action='/setledred' style='margin-top:4px'>
+        <input type='range' name='val' min='0' max='100' value=')rawliteral" + String(ledRedIntensity) + R"rawliteral('
+          oninput="document.getElementById('rv').textContent=this.value"
+          style='flex:1;border:none;padding:6px'>
+        <button type='submit' class='blue-button'>Save</button>
+      </form>
+
+      <h3>Trading Mode</h3>
+    )rawliteral";
+  html += "<a href='/toggletrading' style='text-decoration:none'>";
+  html += "<button class='";
+  html += tradingEnabled ? "green-button" : "red-button";
+  html += "'>Trading: ";
+  html += tradingEnabled ? "ON" : "OFF";
+  html += "</button></a>";
+  html += R"rawliteral(
     </div>
   )rawliteral";
 
@@ -609,6 +683,22 @@ void saveDisplayInterval(unsigned long interval) {
   Serial.println("✅ Saved displayInterval to EEPROM: " + String(interval));
 }
 
+void saveLedSettings() {
+  EEPROM.write(EEPROM_LED_GREEN_ADDR,  (uint8_t)ledGreenIntensity);
+  EEPROM.write(EEPROM_LED_RED_ADDR,    (uint8_t)ledRedIntensity);
+  EEPROM.write(EEPROM_TRADING_EN_ADDR, tradingEnabled ? 1 : 0);
+  EEPROM.commit();
+}
+
+void loadLedSettings() {
+  uint8_t g = EEPROM.read(EEPROM_LED_GREEN_ADDR);
+  uint8_t r = EEPROM.read(EEPROM_LED_RED_ADDR);
+  uint8_t t = EEPROM.read(EEPROM_TRADING_EN_ADDR);
+  ledGreenIntensity = (g <= 100) ? g : 100;
+  ledRedIntensity   = (r <= 100) ? r : 100;
+  tradingEnabled    = (t == 0 || t == 1) ? (t == 1) : true;
+}
+
 void loadDisplayInterval() {
   unsigned long stored;
   EEPROM.get(EEPROM_DISPLAY_ADDR, stored);
@@ -646,10 +736,197 @@ void handleRemove() {
   }
 }
 
+void handleSetLedGreen() {
+  if (server.hasArg("val")) {
+    int v = server.arg("val").toInt();
+    if (v >= 0 && v <= 100) { ledGreenIntensity = v; saveLedSettings(); }
+  }
+  server.sendHeader("Location", "/?saved=1");
+  server.send(303);
+}
+
+void handleSetLedRed() {
+  if (server.hasArg("val")) {
+    int v = server.arg("val").toInt();
+    if (v >= 0 && v <= 100) { ledRedIntensity = v; saveLedSettings(); }
+  }
+  server.sendHeader("Location", "/?saved=1");
+  server.send(303);
+}
+
+void handleToggleTrading() {
+  tradingEnabled = !tradingEnabled;
+  saveLedSettings();
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
 void handleClear() {
   clearList();
   server.sendHeader("Location", "/", true);
   server.send(302, "text/plain", "");
+}
+
+// === Trading Functions ===
+
+void addPriceToHistory(TradingPosition& pos, float price) {
+    pos.priceHistory[pos.historyHead] = price;
+    pos.historyHead = (pos.historyHead + 1) % PRICE_HISTORY_LEN;
+    if (pos.historyCount < PRICE_HISTORY_LEN) pos.historyCount++;
+}
+
+float calculateSMA(TradingPosition& pos, int period) {
+    if (pos.historyCount < period) return 0;
+    float sum = 0;
+    int start = (pos.historyHead - 1 + PRICE_HISTORY_LEN) % PRICE_HISTORY_LEN;
+    for (int i = 0; i < period; i++)
+        sum += pos.priceHistory[(start - i + PRICE_HISTORY_LEN) % PRICE_HISTORY_LEN];
+    return sum / period;
+}
+
+float getPortfolioValue() {
+    float total = tradingCash;
+    for (auto& kv : tradingPositions)
+        if (kv.second.shares > 0 && stockCache.count(kv.first))
+            total += kv.second.shares * stockCache[kv.first].currentPrice;
+    return total;
+}
+
+void logTrade(const String& sym, const String& action, float price, float shares, float pnl) {
+    tradeLog[tradeLogHead] = {sym, action, price, shares, pnl};
+    tradeLogHead = (tradeLogHead + 1) % 5;
+    if (tradeLogCount < 5) tradeLogCount++;
+}
+
+void executeBuy(const String& symbol, float price) {
+    float spend = min(tradingCash, getPortfolioValue() * MAX_POSITION_PCT);
+    if (spend < 1.0f) return;
+    float shares = spend / price;
+    TradingPosition& pos = tradingPositions[symbol];
+    pos.avgBuyPrice = (pos.shares * pos.avgBuyPrice + shares * price) / (pos.shares + shares);
+    pos.shares += shares;
+    tradingCash -= spend;
+    logTrade(symbol, "BUY", price, shares, 0);
+    Serial.printf("[TRADE] BUY  %s: %.4f @ $%.2f\n", symbol.c_str(), shares, price);
+}
+
+void executeSell(const String& symbol, float price) {
+    TradingPosition& pos = tradingPositions[symbol];
+    if (pos.shares <= 0) return;
+    float pnl = (price - pos.avgBuyPrice) * pos.shares;
+    totalRealizedPnL += pnl;
+    tradingCash += pos.shares * price;
+    logTrade(symbol, "SELL", price, pos.shares, pnl);
+    Serial.printf("[TRADE] SELL %s @ $%.2f  PnL $%.2f\n", symbol.c_str(), price, pnl);
+    pos.shares = 0;
+    pos.avgBuyPrice = 0;
+}
+
+void runTradingAlgorithm() {
+    if (!tradingEnabled || !marketIsOpen()) return;
+    Node* node = head;
+    while (node) {
+        String symbol = node->data;
+        symbol.replace("/", "");
+        if (!stockCache.count(symbol)) { node = node->next; continue; }
+        float price = stockCache[symbol].currentPrice;
+        if (price <= 0) { node = node->next; continue; }
+
+        TradingPosition& pos = tradingPositions[symbol];
+        addPriceToHistory(pos, price);
+        if (pos.historyCount < SMA_LONG_PERIOD) { node = node->next; continue; }
+
+        bool bullish = calculateSMA(pos, SMA_SHORT_PERIOD) > calculateSMA(pos, SMA_LONG_PERIOD);
+        if (pos.prevSet) {
+            if ( bullish && !pos.prevBullish && tradingCash > 1.0f) executeBuy(symbol,  price);
+            if (!bullish &&  pos.prevBullish && pos.shares  > 0   ) executeSell(symbol, price);
+        }
+        pos.prevBullish = bullish;
+        pos.prevSet = true;
+        node = node->next;
+    }
+}
+
+void saveTradingState() {
+    File file = LittleFS.open("/trading.json", "w");
+    if (!file) return;
+    DynamicJsonDocument doc(2048);
+    doc["cash"] = tradingCash;
+    doc["pnl"]  = totalRealizedPnL;
+    JsonArray arr = doc.createNestedArray("positions");
+    for (auto& kv : tradingPositions) {
+        if (kv.second.shares > 0) {
+            JsonObject p = arr.createNestedObject();
+            p["sym"]    = kv.first;
+            p["shares"] = kv.second.shares;
+            p["buy"]    = kv.second.avgBuyPrice;
+        }
+    }
+    serializeJson(doc, file);
+    file.close();
+}
+
+void loadTradingState() {
+    if (!LittleFS.exists("/trading.json")) { tradingCash = STARTING_CASH; return; }
+    File file = LittleFS.open("/trading.json", "r");
+    if (!file) return;
+    DynamicJsonDocument doc(2048);
+    if (!deserializeJson(doc, file)) {
+        tradingCash      = doc["cash"] | STARTING_CASH;
+        totalRealizedPnL = doc["pnl"]  | 0.0f;
+        for (JsonObject p : doc["positions"].as<JsonArray>()) {
+            String sym = p["sym"].as<String>();
+            tradingPositions[sym].shares      = p["shares"];
+            tradingPositions[sym].avgBuyPrice = p["buy"];
+        }
+        Serial.printf("[Trading] cash=%.2f  pnl=%.2f\n", tradingCash, totalRealizedPnL);
+    }
+    file.close();
+}
+
+void handleTrading() {
+    float pv  = getPortfolioValue();
+    float pnl = pv - STARTING_CASH;
+    String h = "<!DOCTYPE html><html><head><title>Trading</title><style>"
+               "body{font-family:Arial;background:#f2f2f2;padding:20px}"
+               ".c{background:#fff;padding:24px;border-radius:12px;max-width:520px;margin:auto}"
+               "table{width:100%;border-collapse:collapse}td,th{padding:6px;border:1px solid #ddd}"
+               "th{background:#f5f5f5}.g{color:green}.r{color:red}</style></head>"
+               "<body><div class='c'><h2>Paper Trading</h2>";
+    h += "<p><b>Cash:</b> $" + String(tradingCash, 2) + " &nbsp; ";
+    h += "<b>Portfolio:</b> $" + String(pv, 2) + " &nbsp; ";
+    h += "<b>PnL:</b> <span class='" + String(pnl >= 0 ? "g" : "r") + "'>$" + String(pnl, 2) + "</span></p>";
+    h += "<h3>Positions</h3><table><tr><th>Symbol</th><th>Shares</th>"
+         "<th>Avg Buy</th><th>Current</th><th>PnL</th></tr>";
+    bool any = false;
+    for (auto& kv : tradingPositions) {
+        if (kv.second.shares <= 0) continue;
+        any = true;
+        float cur  = stockCache.count(kv.first) ? stockCache[kv.first].currentPrice : 0;
+        float pp   = (cur - kv.second.avgBuyPrice) * kv.second.shares;
+        h += "<tr><td>" + kv.first + "</td><td>" + String(kv.second.shares, 4) +
+             "</td><td>$" + String(kv.second.avgBuyPrice, 2) +
+             "</td><td>$" + String(cur, 2) +
+             "</td><td class='" + String(pp >= 0 ? "g" : "r") + "'>$" + String(pp, 2) + "</td></tr>";
+    }
+    if (!any) h += "<tr><td colspan='5'>No open positions yet</td></tr>";
+    h += "</table><h3>Recent Trades</h3><table><tr><th>Action</th><th>Symbol</th>"
+         "<th>Price</th><th>Shares</th><th>PnL</th></tr>";
+    for (int i = 0; i < tradeLogCount; i++) {
+        int idx = (tradeLogHead - 1 - i + 5) % 5;
+        TradeRecord& t = tradeLog[idx];
+        h += "<tr><td>" + t.action + "</td><td>" + t.symbol +
+             "</td><td>$" + String(t.price, 2) + "</td><td>" + String(t.shares, 4) +
+             "</td><td>" + (t.action == "SELL"
+                 ? "<span class='" + String(t.pnl >= 0 ? "g" : "r") + "'>$" + String(t.pnl, 2) + "</span>"
+                 : "-") + "</td></tr>";
+    }
+    if (!tradeLogCount)
+        h += "<tr><td colspan='5'>No trades yet (needs " + String(SMA_LONG_PERIOD) + " price samples)</td></tr>";
+    h += "</table><p><small>SMA(" + String(SMA_SHORT_PERIOD) + ") / SMA(" +
+         String(SMA_LONG_PERIOD) + ") crossover &bull; 10 min fetch interval</small></p>"
+         "<p><a href='/'>Back</a></p></div></body></html>";
+    server.send(200, "text/html", h);
 }
 
 void handleNonBlockingFetch() {
@@ -768,8 +1045,8 @@ void checkButton() {
     Serial.print("🔁 Modalità cambiata: ");
     Serial.println(serverMode ? "SERVER" : "DISPLAY");
 
-    digitalWrite(ledGreenPin, LOW);
-    digitalWrite(ledRedPin, LOW);
+    setLedGreen(false);
+    setLedRed(false);
   }
 
   buttonPreviouslyPressed = currentReading;
@@ -1014,11 +1291,70 @@ void blinkMarketLEDsNonBlocking() {
         state = !state;
 
         if (marketIsOpen()) {
-            digitalWrite(ledGreenPin, state);
-            digitalWrite(ledRedPin, LOW);
+            setLedGreen(state);
+            setLedRed(false);
         } else {
-            digitalWrite(ledGreenPin, LOW);
-            digitalWrite(ledRedPin, state);
+            setLedGreen(false);
+            setLedRed(state);
+        }
+    }
+}
+
+void drawTradingStatusFrame() {
+    float pv  = getPortfolioValue();
+    float pnlPct = (pv - STARTING_CASH) / STARTING_CASH * 100.0f;
+
+    int16_t x1, y1;
+    uint16_t w, h;
+
+    display.setFont(&FreeSans9pt7b);
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+
+    String label = "PORTFOLIO";
+    display.getTextBounds(label, 0, 0, &x1, &y1, &w, &h);
+    display.setCursor((SCREEN_WIDTH - w) / 2, 13);
+    display.print(label);
+
+    display.setFont(&FreeSansBold12pt7b);
+    String valStr = "$" + String(pv, 2);
+    display.getTextBounds(valStr, 0, 0, &x1, &y1, &w, &h);
+    display.setCursor((SCREEN_WIDTH - w) / 2, 34);
+    display.print(valStr);
+
+    display.setFont(&FreeSans9pt7b);
+    String lastStr = "NO TRADES YET";
+    if (tradeLogCount > 0) {
+        int idx = (tradeLogHead - 1 + 5) % 5;
+        lastStr = tradeLog[idx].action + " " + tradeLog[idx].symbol;
+    }
+    display.getTextBounds(lastStr, 0, 0, &x1, &y1, &w, &h);
+    display.setCursor((SCREEN_WIDTH - w) / 2, 50);
+    display.print(lastStr);
+
+    display.setFont(&FreeSansBold9pt7b);
+    String pnlStr = (pnlPct >= 0 ? "+" : "") + String(pnlPct, 2) + "%";
+    display.getTextBounds(pnlStr, 0, 0, &x1, &y1, &w, &h);
+    display.setCursor((SCREEN_WIDTH - w) / 2, 63);
+    display.print(pnlStr);
+}
+
+void drawTradingFrameToVirtual(int xOffset) {
+    display.clearDisplay();
+    drawTradingStatusFrame();
+    uint8_t* src = display.getBuffer();
+    for (int y = 0; y < 64; y++) {
+        for (int x = 0; x < 128; x++) {
+            int dstX = x + xOffset;
+            if (dstX >= 256) continue;
+            int srcIndex = x + (y / 8) * 128;
+            bool pixel = (src[srcIndex] >> (y & 7)) & 0x1;
+            if (pixel) {
+                int dstIndex = y * 256 + dstX;
+                int dstByte = dstIndex / 8;
+                int dstBit = 7 - (dstIndex % 8);
+                virtualBuffer[dstByte] |= (1 << dstBit);
+            }
         }
     }
 }
@@ -1085,17 +1421,51 @@ void updateDisplay() {
             blinkMarketLEDsNonBlocking();
 
             if (millis() - stateStartTime > displayInterval) {
+                displayState = tradingEnabled ? TRANSITION_TO_TRADING : TRANSITION_TO_STOCK;
+            }
+            break;
+        }
+
+        case TRANSITION_TO_TRADING: {
+            clearVirtualBuffer();
+            drawCountdownFrameVirtual(statusText, countdown, 0);
+            drawTradingFrameToVirtual(128);
+            for (int offset = 0; offset <= 128; offset += 4) {
+                blitWindowToDisplay(offset);
+                display.display();
+                delay(20);
+            }
+            displayState = SHOW_TRADING;
+            stateStartTime = millis();
+            break;
+        }
+
+        case SHOW_TRADING: {
+            display.clearDisplay();
+            drawTradingStatusFrame();
+            display.display();
+            if (millis() - stateStartTime > displayInterval) {
                 displayState = TRANSITION_TO_STOCK;
             }
             break;
         }
 
         case TRANSITION_TO_STOCK: {
-            // Move countdown → first stock
             String nextSymbol = sanitizeSymbol(displayNode->data);
             StockData nextData = fetchStockData(nextSymbol);
 
-            slideCountdownToStock(statusText, countdown, nextSymbol, nextData);
+            if (tradingEnabled) {
+                clearVirtualBuffer();
+                drawTradingFrameToVirtual(0);
+                drawStockFrameToVirtual(nextSymbol, nextData, 128);
+                for (int offset = 0; offset <= 128; offset += 4) {
+                    blitWindowToDisplay(offset);
+                    display.display();
+                    delay(20);
+                }
+            } else {
+                slideCountdownToStock(statusText, countdown, nextSymbol, nextData);
+            }
             updateLEDs(nextData);
 
             oldSymbol = nextSymbol;
@@ -1110,14 +1480,14 @@ void updateDisplay() {
 
 void updateLEDs(StockData data) {
     if (data.percent > 0) {
-        digitalWrite(ledGreenPin, HIGH);
-        digitalWrite(ledRedPin, LOW);
+        setLedGreen(true);
+        setLedRed(false);
     } else if (data.percent < 0) {
-        digitalWrite(ledGreenPin, LOW);
-        digitalWrite(ledRedPin, HIGH);
+        setLedGreen(false);
+        setLedRed(true);
     } else {
-        digitalWrite(ledGreenPin, LOW);
-        digitalWrite(ledRedPin, LOW);
+        setLedGreen(false);
+        setLedRed(false);
     }
 }
 
@@ -1216,8 +1586,8 @@ void blinkLedsInServerMode() {
 
   if (millis() - lastBlinkTime >= blinkInterval) {
     ledState = !ledState;
-    digitalWrite(ledGreenPin, ledState ? HIGH : LOW);
-    digitalWrite(ledRedPin, ledState ? LOW : HIGH);
+    setLedGreen(ledState);
+    setLedRed(!ledState);
     lastBlinkTime = millis();
   }
 }
@@ -1246,9 +1616,9 @@ void progressBar(int percentage)
 
   display.display();
 
-  digitalWrite(ledGreenPin, HIGH);    
+  setLedGreen(true);    
   delay(2000);
-  digitalWrite(ledGreenPin, LOW);
+  setLedGreen(false);
 }
 
 void showFirstStart()
@@ -1313,8 +1683,8 @@ void setup() {
   pinMode(wifiResetButtonPin, INPUT);
   pinMode(ledGreenPin, OUTPUT);
   pinMode(ledRedPin, OUTPUT);
-  digitalWrite(ledGreenPin, LOW);
-  digitalWrite(ledRedPin, LOW);
+  setLedGreen(false);
+  setLedRed(false);
   //progressBar(10);
 
   if (!LittleFS.begin()) {
@@ -1368,6 +1738,10 @@ void setup() {
   server.on("/clear", handleClear);
   server.on("/setkey", handleSetKey);
   server.on("/settime", handleSetTime);
+  server.on("/trading", handleTrading);
+  server.on("/setledgreen", handleSetLedGreen);
+  server.on("/setledred", handleSetLedRed);
+  server.on("/toggletrading", handleToggleTrading);
 
   //60%
   progressBar(60);
@@ -1393,6 +1767,8 @@ void setup() {
   EEPROM.begin(EEPROM_SIZE);
   loadApiKey();
   loadDisplayInterval();
+  loadLedSettings();
+  loadTradingState();
 
   //100%
   progressBar(100);
@@ -1414,8 +1790,8 @@ void loop() {
       wifiResetStart = millis();
     } else if (millis() - wifiResetStart > 5000) {
       Serial.println("🔧 WiFi reset requested via button");
-      digitalWrite(ledGreenPin, LOW);
-      digitalWrite(ledRedPin, LOW);
+      setLedGreen(false);
+      setLedRed(false);
       delay(500);
       WiFiManager wifiManager;
       wifiManager.resetSettings();
@@ -1465,6 +1841,7 @@ void loop() {
     if (isFetching) {
       showWallStreet();
       handleNonBlockingFetch();
+      if (!isFetching) { runTradingAlgorithm(); saveTradingState(); }
       if (newStock) newStock = false;
     } else {
       updateDisplay();
