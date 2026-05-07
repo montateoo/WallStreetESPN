@@ -68,8 +68,9 @@ Node* head = nullptr;
 
 Node* currentNode = nullptr;
 unsigned long lastQuoteRequestTime = 0;
-const unsigned long quoteDelay = 1500;
+const unsigned long quoteDelay = 3000;
 bool isFetching = false;
+WiFiClientSecure wifiSecureClient;
 
 const int wifiResetButtonPin = 12;
 const int buttonPin = 14;
@@ -192,11 +193,23 @@ ESP8266WebServer server(80);
 void drawStockFrame(String symbol, StockData data, int xOffset);
 void updateLEDs(StockData data);
 
+bool ledGreenState = false;
+bool ledRedState   = false;
+
+uint16_t ledGammaPWM(int intensity) {
+    if (intensity <= 0)   return 0;
+    if (intensity >= 100) return 1023;
+    float norm = intensity / 100.0f;
+    return (uint16_t)(pow(norm, 2.2f) * 1023.0f + 0.5f);
+}
+
 void setLedGreen(bool on) {
-    analogWrite(ledGreenPin, on ? map(ledGreenIntensity, 0, 100, 0, 1023) : 0);
+    ledGreenState = on;
+    analogWrite(ledGreenPin, on ? ledGammaPWM(ledGreenIntensity) : 0);
 }
 void setLedRed(bool on) {
-    analogWrite(ledRedPin, on ? map(ledRedIntensity, 0, 100, 0, 1023) : 0);
+    ledRedState = on;
+    analogWrite(ledRedPin, on ? ledGammaPWM(ledRedIntensity) : 0);
 }
 
 void addNode(String value) {
@@ -694,8 +707,9 @@ void loadLedSettings() {
   uint8_t g = EEPROM.read(EEPROM_LED_GREEN_ADDR);
   uint8_t r = EEPROM.read(EEPROM_LED_RED_ADDR);
   uint8_t t = EEPROM.read(EEPROM_TRADING_EN_ADDR);
-  ledGreenIntensity = (g <= 100) ? g : 100;
-  ledRedIntensity   = (r <= 100) ? r : 100;
+  ledGreenIntensity = (g >= 1 && g <= 100) ? g : 100;
+  ledRedIntensity   = (r >= 1 && r <= 100) ? r : 100;
+  Serial.printf("LED brightness loaded — green: %d%%, red: %d%%\n", ledGreenIntensity, ledRedIntensity);
   tradingEnabled    = (t == 0 || t == 1) ? (t == 1) : true;
 }
 
@@ -739,7 +753,11 @@ void handleRemove() {
 void handleSetLedGreen() {
   if (server.hasArg("val")) {
     int v = server.arg("val").toInt();
-    if (v >= 0 && v <= 100) { ledGreenIntensity = v; saveLedSettings(); }
+    if (v >= 0 && v <= 100) {
+      ledGreenIntensity = v;
+      saveLedSettings();
+      setLedGreen(ledGreenState);
+    }
   }
   server.sendHeader("Location", "/?saved=1");
   server.send(303);
@@ -748,7 +766,11 @@ void handleSetLedGreen() {
 void handleSetLedRed() {
   if (server.hasArg("val")) {
     int v = server.arg("val").toInt();
-    if (v >= 0 && v <= 100) { ledRedIntensity = v; saveLedSettings(); }
+    if (v >= 0 && v <= 100) {
+      ledRedIntensity = v;
+      saveLedSettings();
+      setLedRed(ledRedState);
+    }
   }
   server.sendHeader("Location", "/?saved=1");
   server.send(303);
@@ -939,17 +961,23 @@ void handleNonBlockingFetch() {
 
   if (millis() - lastQuoteRequestTime < quoteDelay) return;
 
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("⚠️ WiFi disconnected, skipping fetch");
+    lastQuoteRequestTime = millis();
+    currentNode = currentNode->next;
+    return;
+  }
+
   String symbol = currentNode->data;
   symbol.replace("/", "");
   String url = "https://finnhub.io/api/v1/quote?symbol=" + symbol + "&token=" + apiKey;
 
-  WiFiClientSecure client;
-  client.setInsecure();
+  ESP.wdtFeed();
 
   HTTPClient https;
   Serial.println("🔎 Requesting: " + url);
 
-  if (https.begin(client, url)) {
+  if (https.begin(wifiSecureClient, url)) {
     https.addHeader("User-Agent", "Mozilla/5.0");
     int httpCode = https.GET();
 
@@ -968,14 +996,15 @@ void handleNonBlockingFetch() {
 
         stockCache[symbol] = { currentPrice, percent };
         Serial.printf("📥 %s: %.2f (%.2f%%)\n", symbol.c_str(), currentPrice, percent);
-
       }
     } else {
       Serial.printf("⚠️ HTTP error: %d\n", httpCode);
+      wifiSecureClient.stop();
     }
     https.end();
   } else {
     Serial.println("[HTTPS] Connection failed");
+    wifiSecureClient.stop();
   }
 
   lastQuoteRequestTime = millis();
@@ -1716,6 +1745,9 @@ void setup() {
     ESP.restart();
   } 
 
+  wifiSecureClient.setInsecure();
+  wifiSecureClient.setBufferSizes(4096, 512);
+
   //40%
   progressBar(40);
   if (WiFi.getMode() == WIFI_AP) {
@@ -1831,7 +1863,7 @@ void loop() {
       return;
     }
 
-    if ((!isFetching && millis() - lastRequest > 600000) || (newStock)) {
+    if (!isFetching && (millis() - lastRequest > 600000 || newStock)) {
       currentNode = head;
       isFetching = true;
       lastQuoteRequestTime = millis() - quoteDelay;
